@@ -56,6 +56,7 @@ class Requirement:
     page: int            # 0-based page index
     pdf_rect: tuple      # (x0, y0, x1, y1) in PDF points
     text: str = ""       # extracted text from the captured region
+    edited: bool = False # True if screenshot was modified in the editor
 
 
 def pixmap_to_bytes(pixmap: QPixmap) -> BytesIO:
@@ -157,7 +158,7 @@ class ZoomScrollArea(QScrollArea):
 # ---------------------------------------------------------------------------
 
 class _EditorCanvas(QLabel):
-    """Label that supports freehand drawing on its pixmap."""
+    """Label that supports freehand and rectangle drawing on its pixmap."""
 
     HIGHLIGHT_ALPHA = 0.30  # opacity applied uniformly to highlight strokes
 
@@ -170,6 +171,7 @@ class _EditorCanvas(QLabel):
 
         self._drawing = False
         self._last_point: Optional[QPoint] = None
+        self._start_point: Optional[QPoint] = None
         self._undo_stack: list = []  # list[QPixmap]
         self._max_undo = 20
 
@@ -180,6 +182,7 @@ class _EditorCanvas(QLabel):
         # tool settings (set by parent dialog)
         self.brush_size = 20
         self.tool = "highlight"  # "highlight" or "whiteout"
+        self.draw_mode = "brush"  # "brush" or "rectangle"
 
     def get_pixmap(self) -> QPixmap:
         return self._pixmap.copy()
@@ -219,6 +222,16 @@ class _EditorCanvas(QLabel):
         painter.end()
         self._composite_highlight()
 
+    def _draw_highlight_rect_on_overlay(self, rect: QRect):
+        """Draw a filled yellow rectangle onto the overlay."""
+        self._stroke_overlay.fill(Qt.transparent)
+        painter = QPainter(self._stroke_overlay)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 0))
+        painter.drawRect(rect)
+        painter.end()
+        self._composite_highlight()
+
     def _composite_highlight(self):
         """Blend overlay onto base at uniform alpha and display."""
         self._pixmap = self._stroke_base.copy()
@@ -252,33 +265,97 @@ class _EditorCanvas(QLabel):
         painter.end()
         self.setPixmap(self._pixmap)
 
+    def _draw_whiteout_rect(self, rect: QRect):
+        """Fill a rectangle with solid white."""
+        painter = QPainter(self._pixmap)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawRect(rect)
+        painter.end()
+        self.setPixmap(self._pixmap)
+
+    def _preview_whiteout_rect(self, rect: QRect):
+        """Show a preview of the white-out rectangle without baking it."""
+        preview = self._stroke_base.copy()
+        painter = QPainter(preview)
+        painter.setPen(QPen(QColor(180, 180, 180), 1, Qt.DashLine))
+        painter.setBrush(QColor(255, 255, 255, 180))
+        painter.drawRect(rect)
+        painter.end()
+        self._pixmap = preview
+        self.setPixmap(self._pixmap)
+
     # -- mouse events -----------------------------------------------------
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._push_undo()
             self._drawing = True
+            self._start_point = event.pos()
             self._last_point = event.pos()
-            if self.tool == "highlight":
-                self._begin_highlight_stroke()
-                self._draw_highlight_on_overlay(event.pos())
+
+            if self.draw_mode == "brush":
+                if self.tool == "highlight":
+                    self._begin_highlight_stroke()
+                    self._draw_highlight_on_overlay(event.pos())
+                else:
+                    self._draw_whiteout(event.pos())
             else:
-                self._draw_whiteout(event.pos())
+                # rectangle mode — snapshot base for live preview
+                if self.tool == "highlight":
+                    self._begin_highlight_stroke()
+                else:
+                    self._stroke_base = self._pixmap.copy()
 
     def mouseMoveEvent(self, event):
-        if self._drawing and self._last_point:
-            if self.tool == "highlight":
-                self._draw_highlight_on_overlay(self._last_point, event.pos())
+        if self._drawing and self._start_point:
+            if self.draw_mode == "brush":
+                if self.tool == "highlight":
+                    self._draw_highlight_on_overlay(self._last_point, event.pos())
+                else:
+                    self._draw_whiteout(self._last_point, event.pos())
+                self._last_point = event.pos()
             else:
-                self._draw_whiteout(self._last_point, event.pos())
-            self._last_point = event.pos()
+                # rectangle mode — live preview
+                rect = QRect(self._start_point, event.pos()).normalized()
+                if self.tool == "highlight":
+                    self._draw_highlight_rect_on_overlay(rect)
+                else:
+                    self._preview_whiteout_rect(rect)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.LeftButton and self._drawing:
             self._drawing = False
+
+            if self.draw_mode == "rectangle" and self._start_point:
+                rect = QRect(self._start_point, event.pos()).normalized()
+                if rect.width() > 2 and rect.height() > 2:
+                    if self.tool == "highlight":
+                        self._finish_highlight_stroke()
+                    else:
+                        # bake the final rectangle from the clean base
+                        self._pixmap = self._stroke_base.copy()
+                        self._draw_whiteout_rect(rect)
+                        self._stroke_base = None
+                else:
+                    # too small — revert
+                    if self.tool == "highlight":
+                        self._pixmap = self._stroke_base.copy()
+                        self.setPixmap(self._pixmap)
+                        self._stroke_base = None
+                        self._stroke_overlay = None
+                    elif self._stroke_base:
+                        self._pixmap = self._stroke_base.copy()
+                        self.setPixmap(self._pixmap)
+                        self._stroke_base = None
+                    if self._undo_stack:
+                        self._undo_stack.pop()
+            else:
+                if self.tool == "highlight":
+                    self._finish_highlight_stroke()
+
             self._last_point = None
-            if self.tool == "highlight":
-                self._finish_highlight_stroke()
+            self._start_point = None
 
 
 class ScreenshotEditorDialog(QDialog):
@@ -321,7 +398,32 @@ class ScreenshotEditorDialog(QDialog):
 
         toolbar.addSpacing(16)
 
-        toolbar.addWidget(QLabel("Brush:"))
+        # draw mode toggle
+        self._btn_brush = QPushButton("Brush")
+        self._btn_brush.setCheckable(True)
+        self._btn_brush.setChecked(True)
+        self._btn_brush.setStyleSheet(
+            "QPushButton:checked { background: #bfdbfe; font-weight: bold; }"
+        )
+
+        self._btn_rect = QPushButton("Rectangle")
+        self._btn_rect.setCheckable(True)
+        self._btn_rect.setStyleSheet(
+            "QPushButton:checked { background: #bfdbfe; font-weight: bold; }"
+        )
+
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_group.addButton(self._btn_brush, 0)
+        self._mode_group.addButton(self._btn_rect, 1)
+
+        toolbar.addWidget(self._btn_brush)
+        toolbar.addWidget(self._btn_rect)
+
+        toolbar.addSpacing(16)
+
+        self._brush_size_label = QLabel("Brush:")
+        toolbar.addWidget(self._brush_size_label)
         self._size_slider = QSlider(Qt.Horizontal)
         self._size_slider.setRange(5, 50)
         self._size_slider.setValue(20)
@@ -359,6 +461,7 @@ class ScreenshotEditorDialog(QDialog):
 
         # -- connections --
         self._tool_group.buttonClicked[int].connect(self._on_tool_changed)
+        self._mode_group.buttonClicked[int].connect(self._on_mode_changed)
         self._size_slider.valueChanged.connect(self._on_size_changed)
         self._btn_undo.clicked.connect(self._canvas.undo)
         self._btn_save.clicked.connect(self.accept)
@@ -366,6 +469,13 @@ class ScreenshotEditorDialog(QDialog):
 
     def _on_tool_changed(self, btn_id):
         self._canvas.tool = "highlight" if btn_id == 0 else "whiteout"
+
+    def _on_mode_changed(self, btn_id):
+        self._canvas.draw_mode = "brush" if btn_id == 0 else "rectangle"
+        is_brush = btn_id == 0
+        self._size_slider.setEnabled(is_brush)
+        self._brush_size_label.setEnabled(is_brush)
+        self._size_label.setEnabled(is_brush)
 
     def _on_size_changed(self, val):
         self._canvas.brush_size = val
@@ -880,6 +990,8 @@ class MainWindow(QMainWindow):
             for req in self._requirements:
                 page = doc[req.page]
                 r = fitz.Rect(req.pdf_rect)
+                if req.edited:
+                    self._overlay_screenshot(page, r, req.screenshot)
                 self._stamp_page(page, r, req.number)
 
             cur = self._viewer.current_page
@@ -917,6 +1029,8 @@ class MainWindow(QMainWindow):
             for req in self._requirements:
                 page = doc[req.page]
                 r = fitz.Rect(req.pdf_rect)
+                if req.edited:
+                    self._overlay_screenshot(page, r, req.screenshot)
                 self._stamp_page(page, r, req.number)
             doc.save(self._markup_path)
             doc.close()
@@ -930,6 +1044,12 @@ class MainWindow(QMainWindow):
 
         # also export requirements doc alongside
         self._auto_export_docx()
+
+    @staticmethod
+    def _overlay_screenshot(page, sel_rect: fitz.Rect, pixmap: QPixmap):
+        """Replace the selected region on the PDF page with the edited screenshot."""
+        img_bytes = pixmap_to_bytes(pixmap)
+        page.insert_image(sel_rect, stream=img_bytes.read())
 
     @staticmethod
     def _stamp_page(page, sel_rect: fitz.Rect, number: str):
@@ -1074,6 +1194,8 @@ class MainWindow(QMainWindow):
         dlg = ScreenshotEditorDialog(req.screenshot, self)
         if dlg.exec_() == QDialog.Accepted:
             req.screenshot = dlg.get_pixmap()
+            req.edited = True
+            self._rebuild_view()
             self._panel.refresh(self._requirements)
             self._panel.list_widget.setCurrentRow(row)
             self._unsaved_changes = True
