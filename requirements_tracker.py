@@ -44,6 +44,15 @@ try:
 except ImportError:
     HAS_TESSERACT = False
 
+try:
+    from openpyxl import Workbook
+    from openpyxl.drawing.image import Image as XlImage
+    from openpyxl.styles import Font as XlFont, Alignment as XlAlignment
+    from openpyxl.utils.units import pixels_to_EMU
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
+
 
 # ---------------------------------------------------------------------------
 # Data
@@ -1107,23 +1116,39 @@ class MainWindow(QMainWindow):
                 "Capture some requirements first."
             )
             return
-        if not HAS_DOCX:
+
+        # build file-type filters based on available libraries
+        filters = []
+        if HAS_DOCX:
+            filters.append("Word Documents (*.docx)")
+        if HAS_OPENPYXL:
+            filters.append("Excel Workbooks (*.xlsx)")
+        if not filters:
             QMessageBox.warning(
                 self, "Missing Dependency",
-                "Install python-docx to export:\n  pip install python-docx"
+                "Install python-docx or openpyxl to export:\n"
+                "  pip install python-docx openpyxl"
             )
             return
-        default = (
-            os.path.splitext(self._markup_path)[0] + "_requirements.docx"
-            if self._markup_path else "requirements.docx"
+
+        base = (
+            os.path.splitext(self._markup_path)[0] + "_requirements"
+            if self._markup_path else "requirements"
         )
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Requirements Document", default,
-            "Word Documents (*.docx)"
+        # default to first available format
+        default_ext = ".docx" if HAS_DOCX else ".xlsx"
+        path, chosen_filter = QFileDialog.getSaveFileName(
+            self, "Export Requirements Document", base + default_ext,
+            ";;".join(filters),
         )
-        if path:
+        if not path:
+            return
+
+        if path.lower().endswith(".xlsx"):
+            self._export_xlsx(path)
+        else:
             self._export_docx(path)
-            self._status.showMessage(f"Exported: {os.path.basename(path)}")
+        self._status.showMessage(f"Exported: {os.path.basename(path)}")
 
     def _export_docx(self, path: str):
         try:
@@ -1172,6 +1197,83 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(
                 self, "Export Error", f"Failed to export:\n{e}"
+            )
+
+    def _export_xlsx(self, path: str):
+        try:
+            import tempfile
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Requirements"
+
+            # header info rows
+            ws.append(["Requirements Tracker"])
+            ws["A1"].font = XlFont(size=16, bold=True)
+            if self._pdf_path:
+                ws.append([f"Source: {os.path.basename(self._pdf_path)}"])
+            ws.append([f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}"])
+            ws.append([f"Total requirements: {len(self._requirements)}"])
+            ws.append([])  # blank row
+
+            # table header
+            header_row = ws.max_row + 1
+            headers = ["Req #", "Screenshot", "Extracted Text", "Page", "Notes"]
+            ws.append(headers)
+            for col_idx, h in enumerate(headers, 1):
+                cell = ws.cell(row=header_row, column=col_idx)
+                cell.font = XlFont(bold=True)
+
+            # column widths
+            ws.column_dimensions["A"].width = 10
+            ws.column_dimensions["B"].width = 50
+            ws.column_dimensions["C"].width = 50
+            ws.column_dimensions["D"].width = 8
+            ws.column_dimensions["E"].width = 30
+
+            # data rows
+            tmp_files = []
+            for req in self._requirements:
+                data_row = ws.max_row + 1
+                ws.cell(row=data_row, column=1, value=req.number)
+
+                # save screenshot to temp file for openpyxl
+                img_io = pixmap_to_bytes(req.screenshot)
+                tmp = tempfile.NamedTemporaryFile(
+                    suffix=".png", delete=False
+                )
+                tmp.write(img_io.read())
+                tmp.close()
+                tmp_files.append(tmp.name)
+
+                img = XlImage(tmp.name)
+                # scale to fit ~350px wide, keep aspect ratio
+                max_w = 350
+                scale = min(max_w / img.width, 1.0)
+                img.width = int(img.width * scale)
+                img.height = int(img.height * scale)
+                ws.add_image(img, f"B{data_row}")
+
+                # set row height to fit the image
+                ws.row_dimensions[data_row].height = img.height * 0.75
+
+                ws.cell(row=data_row, column=3, value=req.text)
+                ws.cell(row=data_row, column=3).alignment = XlAlignment(
+                    wrap_text=True, vertical="top"
+                )
+                ws.cell(row=data_row, column=4, value=req.page + 1)
+                ws.cell(row=data_row, column=5, value="")
+
+            wb.save(path)
+
+            # clean up temp files
+            for f in tmp_files:
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
+        except Exception as e:
+            QMessageBox.warning(
+                self, "Export Error", f"Failed to export Excel:\n{e}"
             )
 
     # ===================== Delete ==========================================
