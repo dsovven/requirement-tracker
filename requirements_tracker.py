@@ -1117,10 +1117,25 @@ class MainWindow(QMainWindow):
 
     # ===================== Requirements document export ====================
 
+    def _default_export_base(self) -> str:
+        """Return default export basename: '{pdf_name} YYYY.MM.DD RQMT'."""
+        if self._pdf_path:
+            name = os.path.splitext(os.path.basename(self._pdf_path))[0]
+            directory = os.path.dirname(self._pdf_path)
+        elif self._markup_path:
+            name = os.path.splitext(os.path.basename(self._markup_path))[0]
+            directory = os.path.dirname(self._markup_path)
+        else:
+            name = "requirements"
+            directory = ""
+        date_str = datetime.now().strftime("%Y.%m.%d")
+        base = os.path.join(directory, f"{name} {date_str} RQMT")
+        return base
+
     def _auto_export_docx(self):
         if not HAS_DOCX or not self._markup_path:
             return
-        path = os.path.splitext(self._markup_path)[0] + "_requirements.docx"
+        path = self._default_export_base() + ".docx"
         self._export_docx(path)
 
     def _manual_export(self):
@@ -1145,11 +1160,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        base = (
-            os.path.splitext(self._markup_path)[0] + "_requirements"
-            if self._markup_path else "requirements"
-        )
-        # default to first available format
+        base = self._default_export_base()
         default_ext = ".docx" if HAS_DOCX else ".xlsx"
         path, chosen_filter = QFileDialog.getSaveFileName(
             self, "Export Requirements Document", base + default_ext,
