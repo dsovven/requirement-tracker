@@ -7,6 +7,8 @@ stamps requirement numbers on the PDF, and generates a tracking document.
 
 import sys
 import os
+import json
+import base64
 from datetime import datetime
 from io import BytesIO
 from dataclasses import dataclass, field
@@ -19,7 +21,8 @@ from PyQt5.QtWidgets import (
     QGraphicsView, QGraphicsScene, QToolBar, QAction, QFileDialog,
     QLabel, QLineEdit, QCheckBox, QListWidget, QListWidgetItem,
     QSplitter, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
-    QStyle, QGroupBox, QFormLayout, QDialog, QSlider, QButtonGroup
+    QStyle, QGroupBox, QFormLayout, QDialog, QSlider, QButtonGroup,
+    QMenu, QInputDialog, QTextEdit
 )
 from PyQt5.QtCore import (
     Qt, QRectF, QRect, QPoint, QSize, pyqtSignal, QBuffer, QByteArray
@@ -78,6 +81,7 @@ class Requirement:
     edited: bool = False # True if screenshot was modified in the editor
     highlight_pixmap: Optional[QPixmap] = None  # screenshot with highlights only (no white-out)
     markup_color: tuple = (0.85, 0.15, 0.15)  # RGB for stamp/outline on PDF
+    notes: str = ""      # user-entered notes (exported to Notes column)
 
 
 def pixmap_to_bytes(pixmap: QPixmap) -> BytesIO:
@@ -721,6 +725,14 @@ class ReqItemWidget(QWidget):
         layout.addWidget(thumb)
         layout.addWidget(info)
 
+        if req.notes:
+            notes_lbl = QLabel("[N]")
+            notes_lbl.setFont(QFont("Segoe UI", 8))
+            notes_lbl.setStyleSheet("color: #666;")
+            notes_lbl.setToolTip(req.notes[:200])
+            notes_lbl.setFixedWidth(22)
+            layout.addWidget(notes_lbl)
+
 
 # ---------------------------------------------------------------------------
 # Requirements Panel  (right-hand sidebar)
@@ -730,7 +742,11 @@ class RequirementsPanel(QWidget):
     """Sidebar listing captured requirements + numbering controls."""
 
     delete_requested = pyqtSignal(int)  # list row index
+    bulk_delete_requested = pyqtSignal(list)  # list of row indices
     edit_requested = pyqtSignal(int)    # list row index (double-click)
+    edit_notes_requested = pyqtSignal(int)
+    change_color_requested = pyqtSignal(int, int)  # row, color index
+    copy_text_requested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -790,8 +806,12 @@ class RequirementsPanel(QWidget):
         layout.addWidget(list_label)
 
         self.list_widget = QListWidget()
-        self.list_widget.setSelectionMode(QListWidget.SingleSelection)
+        self.list_widget.setSelectionMode(QListWidget.ExtendedSelection)
         self.list_widget.setSpacing(2)
+        self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(
+            self._show_context_menu
+        )
         layout.addWidget(self.list_widget, 1)
 
         self.delete_btn = QPushButton("Delete Selected")
@@ -819,14 +839,54 @@ class RequirementsPanel(QWidget):
         )
 
     def _on_delete(self):
-        row = self.list_widget.currentRow()
-        if row >= 0:
-            self.delete_requested.emit(row)
+        rows = sorted(
+            set(self.list_widget.row(item)
+                for item in self.list_widget.selectedItems())
+        )
+        if rows:
+            self.bulk_delete_requested.emit(rows)
 
     def _on_double_click(self, item):
         row = self.list_widget.row(item)
         if row >= 0:
             self.edit_requested.emit(row)
+
+    def _show_context_menu(self, pos):
+        item = self.list_widget.itemAt(pos)
+        if item is None:
+            return
+        row = self.list_widget.row(item)
+        if row < 0:
+            return
+
+        menu = QMenu(self)
+        act_notes = menu.addAction("Edit Notes...")
+        act_edit = menu.addAction("Edit Screenshot...")
+        act_copy = menu.addAction("Copy Text")
+
+        color_menu = menu.addMenu("Change Color")
+        color_actions = []
+        for i, (name, _rgb, _hexc) in enumerate(MARKUP_COLORS):
+            act = color_menu.addAction(name)
+            act.setData(i)
+            color_actions.append(act)
+
+        menu.addSeparator()
+        act_delete = menu.addAction("Delete")
+
+        action = menu.exec_(self.list_widget.mapToGlobal(pos))
+        if action is None:
+            return
+        if action == act_notes:
+            self.edit_notes_requested.emit(row)
+        elif action == act_edit:
+            self.edit_requested.emit(row)
+        elif action == act_copy:
+            self.copy_text_requested.emit(row)
+        elif action == act_delete:
+            self.delete_requested.emit(row)
+        elif action in color_actions:
+            self.change_color_requested.emit(row, action.data())
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +911,7 @@ class MainWindow(QMainWindow):
         self._next_sub = 1
         self._last_main = 0
         self._unsaved_changes = False
+        self._deleted_stack: list = []  # undo stack for deleted requirements
 
         # -- widgets --
         self._build_toolbar()
@@ -858,6 +919,10 @@ class MainWindow(QMainWindow):
         self._build_statusbar()
         self._connect_signals()
         self._update_number_display()
+        self._update_title()
+
+        # drag-and-drop PDF opening
+        self.setAcceptDrops(True)
 
     # ===================== UI construction =================================
 
@@ -943,6 +1008,10 @@ class MainWindow(QMainWindow):
             self._on_next_number_edited
         )
         self._panel.edit_requested.connect(self._edit_screenshot)
+        self._panel.bulk_delete_requested.connect(self._delete_requirements)
+        self._panel.edit_notes_requested.connect(self._edit_notes)
+        self._panel.change_color_requested.connect(self._change_requirement_color)
+        self._panel.copy_text_requested.connect(self._copy_requirement_text)
         self._panel.list_widget.currentRowChanged.connect(
             self._on_list_selection_changed
         )
@@ -956,7 +1025,9 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._open_pdf_from_path(path)
 
+    def _open_pdf_from_path(self, path: str):
         try:
             with open(path, "rb") as f:
                 self._original_bytes = f.read()
@@ -969,8 +1040,9 @@ class MainWindow(QMainWindow):
         self._pdf_path = path
         self._markup_path = None
         self._doc = doc
-        self._unsaved_changes = False
+        self._set_unsaved(False)
         self._requirements.clear()
+        self._deleted_stack.clear()
         self._next_main = 1
         self._next_sub = 1
         self._last_main = 0
@@ -981,6 +1053,9 @@ class MainWindow(QMainWindow):
         self._panel.refresh(self._requirements)
         self._update_number_display()
         self._status.showMessage(f"Opened: {os.path.basename(path)}")
+
+        # check for session restore
+        self._check_session_restore()
 
     # ===================== Selection / capture =============================
 
@@ -1031,6 +1106,7 @@ class MainWindow(QMainWindow):
         new_row = self._requirements.index(req)
         self._panel.list_widget.setCurrentRow(new_row)
         self._update_number_display()
+        self._save_session()
         self._status.showMessage(
             f"Requirement {req.number} captured  (unsaved)"
         )
@@ -1243,7 +1319,7 @@ class MainWindow(QMainWindow):
                 self._doc.close()
             self._doc = doc
             self._viewer.set_document(self._doc, page=cur)
-            self._unsaved_changes = True
+            self._set_unsaved(True)
         except Exception as e:
             QMessageBox.warning(self, "Rebuild Error", str(e))
 
@@ -1279,7 +1355,14 @@ class MainWindow(QMainWindow):
                 self._stamp_page(page, r, req.number, req.markup_color)
             doc.save(self._markup_path)
             doc.close()
-            self._unsaved_changes = False
+            self._set_unsaved(False)
+            # remove session sidecar since work is now saved in the PDF
+            sp = self._session_path()
+            if sp and os.path.exists(sp):
+                try:
+                    os.unlink(sp)
+                except OSError:
+                    pass
             self._status.showMessage(
                 f"Saved: {os.path.basename(self._markup_path)}"
             )
@@ -1438,7 +1521,7 @@ class MainWindow(QMainWindow):
 
                 row.cells[2].text = req.text
                 row.cells[3].text = str(req.page + 1)
-                row.cells[4].text = ""
+                row.cells[4].text = req.notes
 
             doc.save(path)
         except Exception as e:
@@ -1508,7 +1591,7 @@ class MainWindow(QMainWindow):
                     wrap_text=True, vertical="top"
                 )
                 ws.cell(row=data_row, column=4, value=req.page + 1)
-                ws.cell(row=data_row, column=5, value="")
+                ws.cell(row=data_row, column=5, value=req.notes)
 
             wb.save(path)
 
@@ -1523,18 +1606,58 @@ class MainWindow(QMainWindow):
                 self, "Export Error", f"Failed to export Excel:\n{e}"
             )
 
-    # ===================== Delete ==========================================
+    # ===================== Delete / Undo ====================================
 
     def _delete_requirement(self, row: int):
         if 0 <= row < len(self._requirements):
             removed = self._requirements.pop(row)
+            self._deleted_stack.append([(row, removed)])
             self._renumber_requirements()
             self._rebuild_view()
             self._panel.refresh(self._requirements)
             self._update_number_display()
+            self._save_session()
             self._status.showMessage(
-                f"Deleted requirement {removed.number}  (unsaved)"
+                f"Deleted requirement {removed.number}  (Ctrl+Z to undo)"
             )
+
+    def _delete_requirements(self, rows: list):
+        """Bulk delete multiple selected requirements (undo-capable)."""
+        if not rows:
+            return
+        group = []
+        for r in sorted(rows, reverse=True):
+            if 0 <= r < len(self._requirements):
+                removed = self._requirements.pop(r)
+                group.append((r, removed))
+        if group:
+            group.reverse()  # store in ascending order for undo
+            self._deleted_stack.append(group)
+            self._renumber_requirements()
+            self._rebuild_view()
+            self._panel.refresh(self._requirements)
+            self._update_number_display()
+            self._save_session()
+            self._status.showMessage(
+                f"Deleted {len(group)} requirement(s)  (Ctrl+Z to undo)"
+            )
+
+    def _undo_delete(self):
+        """Restore the last deleted requirement(s)."""
+        if not self._deleted_stack:
+            self._status.showMessage("Nothing to undo")
+            return
+        group = self._deleted_stack.pop()
+        for orig_row, req in group:
+            idx = min(orig_row, len(self._requirements))
+            self._requirements.insert(idx, req)
+        self._renumber_requirements()
+        self._rebuild_view()
+        self._panel.refresh(self._requirements)
+        self._update_number_display()
+        self._save_session()
+        nums = ", ".join(req.number for _, req in group)
+        self._status.showMessage(f"Restored requirement(s): {nums}")
 
     # ===================== Screenshot editing ================================
 
@@ -1550,12 +1673,93 @@ class MainWindow(QMainWindow):
             self._rebuild_view()
             self._panel.refresh(self._requirements)
             self._panel.list_widget.setCurrentRow(row)
-            self._unsaved_changes = True
+            self._set_unsaved(True)
+            self._save_session()
             self._status.showMessage(
                 f"Requirement {req.number} screenshot edited  (unsaved)"
             )
 
+    # ===================== Notes / Color / Copy =============================
+
+    def _edit_notes(self, row: int):
+        if not (0 <= row < len(self._requirements)):
+            return
+        req = self._requirements[row]
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Notes — Requirement {req.number}")
+        dlg.resize(400, 250)
+        layout = QVBoxLayout(dlg)
+        text_edit = QTextEdit()
+        text_edit.setPlainText(req.notes)
+        layout.addWidget(text_edit)
+        btn_layout = QHBoxLayout()
+        btn_ok = QPushButton("OK")
+        btn_cancel = QPushButton("Cancel")
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_ok)
+        btn_layout.addWidget(btn_cancel)
+        layout.addLayout(btn_layout)
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        if dlg.exec_() == QDialog.Accepted:
+            req.notes = text_edit.toPlainText()
+            self._panel.refresh(self._requirements)
+            self._panel.list_widget.setCurrentRow(row)
+            self._set_unsaved(True)
+            self._save_session()
+            self._status.showMessage(
+                f"Notes updated for requirement {req.number}"
+            )
+
+    def _change_requirement_color(self, row: int, color_idx: int):
+        if not (0 <= row < len(self._requirements)):
+            return
+        if not (0 <= color_idx < len(MARKUP_COLORS)):
+            return
+        req = self._requirements[row]
+        req.markup_color = MARKUP_COLORS[color_idx][1]
+        self._rebuild_view()
+        self._panel.refresh(self._requirements)
+        self._panel.list_widget.setCurrentRow(row)
+        self._save_session()
+        self._status.showMessage(
+            f"Color changed for requirement {req.number}"
+        )
+
+    def _copy_requirement_text(self, row: int):
+        if not (0 <= row < len(self._requirements)):
+            return
+        req = self._requirements[row]
+        clipboard = QApplication.clipboard()
+        clipboard.setText(req.text)
+        self._status.showMessage(
+            f"Text copied for requirement {req.number}"
+        )
+
     # ===================== Navigation / UI updates =========================
+
+    def _set_unsaved(self, value: bool):
+        self._unsaved_changes = value
+        self._update_title()
+
+    def _update_title(self):
+        title = "Requirements Tracker"
+        if self._pdf_path:
+            title = f"{os.path.basename(self._pdf_path)} — {title}"
+        if self._unsaved_changes:
+            title = f"* {title}"
+        self.setWindowTitle(title)
+
+    def _go_to_page_dialog(self):
+        if not self._doc:
+            return
+        total = len(self._doc)
+        page, ok = QInputDialog.getInt(
+            self, "Go to Page", f"Page (1–{total}):",
+            self._viewer.current_page + 1, 1, total
+        )
+        if ok:
+            self._viewer.go_to_page(page - 1)
 
     def _on_page_changed(self, current: int, total: int):
         self._page_label.setText(f" Page {current + 1} / {total} ")
@@ -1567,6 +1771,153 @@ class MainWindow(QMainWindow):
             req = self._requirements[row]
             self._viewer.go_to_page(req.page)
             self._viewer.scroll_to_pdf_point(req.pdf_rect[0], req.pdf_rect[1])
+
+    # ===================== Drag-and-drop ===================================
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.toLocalFile().lower().endswith(".pdf"):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith(".pdf"):
+                self._open_pdf_from_path(path)
+                return
+
+    # ===================== Session save / restore ==========================
+
+    def _session_path(self) -> Optional[str]:
+        if self._pdf_path:
+            return self._pdf_path + ".rqmt.json"
+        return None
+
+    @staticmethod
+    def _pixmap_to_b64(pixmap: QPixmap) -> str:
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QBuffer.WriteOnly)
+        pixmap.save(buf, "PNG")
+        buf.close()
+        return base64.b64encode(bytes(ba)).decode("ascii")
+
+    @staticmethod
+    def _b64_to_pixmap(b64_str: str) -> QPixmap:
+        data = base64.b64decode(b64_str)
+        img = QImage()
+        img.loadFromData(data, "PNG")
+        return QPixmap.fromImage(img)
+
+    def _save_session(self):
+        sp = self._session_path()
+        if not sp:
+            return
+        try:
+            data = []
+            for req in self._requirements:
+                entry = {
+                    "number": req.number,
+                    "page": req.page,
+                    "pdf_rect": list(req.pdf_rect),
+                    "text": req.text,
+                    "edited": req.edited,
+                    "markup_color": list(req.markup_color),
+                    "notes": req.notes,
+                    "screenshot": self._pixmap_to_b64(req.screenshot),
+                }
+                if req.highlight_pixmap is not None:
+                    entry["highlight_pixmap"] = self._pixmap_to_b64(
+                        req.highlight_pixmap
+                    )
+                data.append(entry)
+            with open(sp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception:
+            pass  # non-critical; don't disrupt the user
+
+    def _load_session(self) -> List[Requirement]:
+        sp = self._session_path()
+        if not sp or not os.path.exists(sp):
+            return []
+        try:
+            with open(sp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            reqs = []
+            for entry in data:
+                screenshot = self._b64_to_pixmap(entry["screenshot"])
+                highlight = None
+                if "highlight_pixmap" in entry:
+                    highlight = self._b64_to_pixmap(entry["highlight_pixmap"])
+                reqs.append(Requirement(
+                    number=entry["number"],
+                    screenshot=screenshot,
+                    page=entry["page"],
+                    pdf_rect=tuple(entry["pdf_rect"]),
+                    text=entry.get("text", ""),
+                    edited=entry.get("edited", False),
+                    highlight_pixmap=highlight,
+                    markup_color=tuple(entry.get("markup_color",
+                                                 (0.85, 0.15, 0.15))),
+                    notes=entry.get("notes", ""),
+                ))
+            return reqs
+        except Exception:
+            return []
+
+    def _check_session_restore(self):
+        sp = self._session_path()
+        if not sp or not os.path.exists(sp):
+            return
+        reply = QMessageBox.question(
+            self, "Restore Session",
+            "A previous session was found for this PDF.\n"
+            "Would you like to restore your captured requirements?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            reqs = self._load_session()
+            if reqs:
+                self._requirements = reqs
+                self._sort_requirements()
+                # set numbering state from loaded requirements
+                max_main = 0
+                max_sub = {}
+                for req in self._requirements:
+                    parts = req.number.split(".", 1)
+                    try:
+                        m = int(parts[0])
+                    except ValueError:
+                        continue
+                    max_main = max(max_main, m)
+                    if len(parts) > 1:
+                        try:
+                            s = int(parts[1])
+                        except ValueError:
+                            continue
+                        max_sub[m] = max(max_sub.get(m, 0), s)
+                self._next_main = max_main + 1
+                self._last_main = max_main
+                self._next_sub = max_sub.get(max_main, 0) + 1
+                self._rebuild_view()
+                self._panel.refresh(self._requirements)
+                self._update_number_display()
+                self._set_unsaved(True)
+                self._status.showMessage(
+                    f"Restored {len(reqs)} requirement(s) from session"
+                )
+        else:
+            # user declined; delete the stale sidecar
+            try:
+                os.unlink(sp)
+            except OSError:
+                pass
 
     # ===================== Keyboard shortcuts ==============================
 
@@ -1584,6 +1935,12 @@ class MainWindow(QMainWindow):
             if key == Qt.Key_E:
                 self._manual_export()
                 return
+            if key == Qt.Key_Z:
+                self._undo_delete()
+                return
+            if key == Qt.Key_G:
+                self._go_to_page_dialog()
+                return
             if key == Qt.Key_Equal or key == Qt.Key_Plus:
                 self._viewer.zoom_in()
                 return
@@ -1598,9 +1955,15 @@ class MainWindow(QMainWindow):
             self._viewer.prev_page()
             return
         if key == Qt.Key_Delete:
-            row = self._panel.list_widget.currentRow()
-            if row >= 0:
-                self._delete_requirement(row)
+            selected = self._panel.list_widget.selectedItems()
+            if len(selected) > 1:
+                rows = [self._panel.list_widget.row(item)
+                        for item in selected]
+                self._delete_requirements(rows)
+            else:
+                row = self._panel.list_widget.currentRow()
+                if row >= 0:
+                    self._delete_requirement(row)
             return
         if key == Qt.Key_F:
             self._viewer.fit_width()

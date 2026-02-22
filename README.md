@@ -42,9 +42,11 @@ python requirements_tracker.py
 | Ctrl+O | Open PDF |
 | Ctrl+S | Save markup |
 | Ctrl+E | Export document |
+| Ctrl+Z | Undo last delete |
+| Ctrl+G | Go to page |
 | Ctrl+/- | Zoom in/out |
 | Page Up/Down or Arrow Keys | Navigate pages |
-| Delete | Delete selected requirement |
+| Delete | Delete selected requirement(s) |
 | F | Fit width |
 
 ## Dependencies
