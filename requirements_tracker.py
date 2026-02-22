@@ -159,6 +159,8 @@ class ZoomScrollArea(QScrollArea):
 class _EditorCanvas(QLabel):
     """Label that supports freehand drawing on its pixmap."""
 
+    HIGHLIGHT_ALPHA = 0.30  # opacity applied uniformly to highlight strokes
+
     def __init__(self, pixmap: QPixmap, parent=None):
         super().__init__(parent)
         self._pixmap = pixmap.copy()
@@ -170,6 +172,10 @@ class _EditorCanvas(QLabel):
         self._last_point: Optional[QPoint] = None
         self._undo_stack: list = []  # list[QPixmap]
         self._max_undo = 20
+
+        # stroke overlay for highlight (prevents alpha accumulation)
+        self._stroke_base: Optional[QPixmap] = None
+        self._stroke_overlay: Optional[QPixmap] = None
 
         # tool settings (set by parent dialog)
         self.brush_size = 20
@@ -188,54 +194,91 @@ class _EditorCanvas(QLabel):
             self._undo_stack.pop(0)
         self._undo_stack.append(self._pixmap.copy())
 
-    def _draw_at(self, pos: QPoint):
-        painter = QPainter(self._pixmap)
+    # -- overlay helpers for highlight tool --------------------------------
+
+    def _begin_highlight_stroke(self):
+        """Snapshot base and create a transparent overlay for the stroke."""
+        self._stroke_base = self._pixmap.copy()
+        self._stroke_overlay = QPixmap(self._pixmap.size())
+        self._stroke_overlay.fill(Qt.transparent)
+
+    def _draw_highlight_on_overlay(self, p1: QPoint, p2: QPoint = None):
+        """Draw solid yellow onto the overlay (no alpha — alpha applied at composite)."""
+        painter = QPainter(self._stroke_overlay)
         painter.setRenderHint(QPainter.Antialiasing)
-        if self.tool == "highlight":
-            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(255, 255, 0, 80))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(255, 255, 0))
+        if p2 is None:
+            r = self.brush_size / 2
+            painter.drawEllipse(p1, r, r)
         else:
-            painter.setCompositionMode(QPainter.CompositionMode_Source)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(255, 255, 255, 255))
-        r = self.brush_size / 2
-        painter.drawEllipse(pos, r, r)
+            pen = QPen(QColor(255, 255, 0), self.brush_size,
+                       Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.drawLine(p1, p2)
+        painter.end()
+        self._composite_highlight()
+
+    def _composite_highlight(self):
+        """Blend overlay onto base at uniform alpha and display."""
+        self._pixmap = self._stroke_base.copy()
+        painter = QPainter(self._pixmap)
+        painter.setOpacity(self.HIGHLIGHT_ALPHA)
+        painter.drawPixmap(0, 0, self._stroke_overlay)
         painter.end()
         self.setPixmap(self._pixmap)
 
-    def _draw_line(self, p1: QPoint, p2: QPoint):
+    def _finish_highlight_stroke(self):
+        """Bake the composited result and clear overlay state."""
+        self._stroke_base = None
+        self._stroke_overlay = None
+
+    # -- direct drawing for white-out tool --------------------------------
+
+    def _draw_whiteout(self, p1: QPoint, p2: QPoint = None):
         painter = QPainter(self._pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-        if self.tool == "highlight":
-            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-            pen = QPen(QColor(255, 255, 0, 80), self.brush_size,
-                       Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        if p2 is None:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 255, 255))
+            r = self.brush_size / 2
+            painter.drawEllipse(p1, r, r)
         else:
-            painter.setCompositionMode(QPainter.CompositionMode_Source)
-            pen = QPen(QColor(255, 255, 255, 255), self.brush_size,
+            pen = QPen(QColor(255, 255, 255), self.brush_size,
                        Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-        painter.setPen(pen)
-        painter.drawLine(p1, p2)
+            painter.setPen(pen)
+            painter.drawLine(p1, p2)
         painter.end()
         self.setPixmap(self._pixmap)
+
+    # -- mouse events -----------------------------------------------------
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._push_undo()
             self._drawing = True
             self._last_point = event.pos()
-            self._draw_at(event.pos())
+            if self.tool == "highlight":
+                self._begin_highlight_stroke()
+                self._draw_highlight_on_overlay(event.pos())
+            else:
+                self._draw_whiteout(event.pos())
 
     def mouseMoveEvent(self, event):
         if self._drawing and self._last_point:
-            self._draw_line(self._last_point, event.pos())
+            if self.tool == "highlight":
+                self._draw_highlight_on_overlay(self._last_point, event.pos())
+            else:
+                self._draw_whiteout(self._last_point, event.pos())
             self._last_point = event.pos()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._drawing = False
             self._last_point = None
+            if self.tool == "highlight":
+                self._finish_highlight_stroke()
 
 
 class ScreenshotEditorDialog(QDialog):
