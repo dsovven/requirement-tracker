@@ -992,10 +992,25 @@ class MainWindow(QMainWindow):
 
     # ===================== PDF stamping / rebuild ==========================
 
+    @staticmethod
+    def _strip_structure_tree(doc):
+        """Remove the PDF structure tree to prevent MuPDF errors on tagged PDFs."""
+        try:
+            cat = doc.pdf_catalog()
+            xref = doc.xref_get_key(cat, "StructTreeRoot")
+            if xref[0] != "null":
+                doc.xref_set_key(cat, "StructTreeRoot", "null")
+                xref_mark = doc.xref_get_key(cat, "MarkInfo")
+                if xref_mark[0] != "null":
+                    doc.xref_set_key(cat, "MarkInfo", "null")
+        except Exception:
+            pass
+
     def _rebuild_view(self):
         """Recreate all stamps on a fresh copy and display (no disk save)."""
         try:
             doc = fitz.open(stream=self._original_bytes, filetype="pdf")
+            self._strip_structure_tree(doc)
             for req in self._requirements:
                 page = doc[req.page]
                 r = fitz.Rect(req.pdf_rect)
@@ -1035,6 +1050,7 @@ class MainWindow(QMainWindow):
 
         try:
             doc = fitz.open(stream=self._original_bytes, filetype="pdf")
+            self._strip_structure_tree(doc)
             for req in self._requirements:
                 page = doc[req.page]
                 r = fitz.Rect(req.pdf_rect)
@@ -1057,20 +1073,6 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _overlay_screenshot(page, sel_rect: fitz.Rect, pixmap: QPixmap):
         """Replace the selected region on the PDF page with the edited screenshot."""
-        # Remove the PDF structure tree to avoid MuPDF "No common ancestor"
-        # errors when inserting images into tagged/structured PDFs.
-        doc = page.parent
-        try:
-            cat = doc.pdf_catalog()
-            xref = doc.xref_get_key(cat, "StructTreeRoot")
-            if xref[0] != "null":
-                doc.xref_set_key(cat, "StructTreeRoot", "null")
-                xref_mark = doc.xref_get_key(cat, "MarkInfo")
-                if xref_mark[0] != "null":
-                    doc.xref_set_key(cat, "MarkInfo", "null")
-        except Exception:
-            pass  # not a PDF or catalog unavailable — proceed anyway
-
         img_bytes = pixmap_to_bytes(pixmap)
         page.insert_image(sel_rect, stream=img_bytes.read())
 
