@@ -647,9 +647,18 @@ class PDFViewer(QWidget):
         self._zoom = max(vp_w / page.rect.width, 0.5)
         self._render()
 
+    @property
+    def page_rect_origin(self):
+        """Return the (x0, y0) of the current page's rect (CropBox/rotation offset)."""
+        if self._doc and 0 <= self._current_page < len(self._doc):
+            r = self._doc[self._current_page].rect
+            return (r.x0, r.y0)
+        return (0.0, 0.0)
+
     def scroll_to_pdf_point(self, pdf_x, pdf_y):
-        px = int(pdf_x * self._zoom)
-        py = int(pdf_y * self._zoom)
+        ox, oy = self.page_rect_origin
+        px = int((pdf_x - ox) * self._zoom)
+        py = int((pdf_y - oy) * self._zoom)
         self._scroll.ensureVisible(px, py, 100, 100)
 
     # -- internal ----------------------------------------------------------
@@ -984,12 +993,13 @@ class MainWindow(QMainWindow):
             return
 
         zoom = self._viewer.render_zoom
+        ox, oy = self._viewer.page_rect_origin
 
-        # convert pixmap coords → PDF points
-        pdf_x0 = pixmap_rect.x() / zoom
-        pdf_y0 = pixmap_rect.y() / zoom
-        pdf_x1 = pixmap_rect.right() / zoom
-        pdf_y1 = pixmap_rect.bottom() / zoom
+        # convert pixmap coords → PDF points (accounting for page CropBox origin)
+        pdf_x0 = pixmap_rect.x() / zoom + ox
+        pdf_y0 = pixmap_rect.y() / zoom + oy
+        pdf_x1 = pixmap_rect.right() / zoom + ox
+        pdf_y1 = pixmap_rect.bottom() / zoom + oy
         pdf_rect = (pdf_x0, pdf_y0, pdf_x1, pdf_y1)
 
         # capture a clean high-res screenshot from the ORIGINAL pdf
