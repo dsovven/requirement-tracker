@@ -1012,14 +1012,17 @@ class MainWindow(QMainWindow):
             markup_color=self._panel.selected_markup_color,
         )
         self._requirements.append(req)
+        self._sort_requirements()
 
         # rebuild in-memory stamped view (no disk save)
         self._rebuild_view()
         self._panel.refresh(self._requirements)
-        self._panel.list_widget.setCurrentRow(len(self._requirements) - 1)
+        # select the newly captured requirement after sorting
+        new_row = self._requirements.index(req)
+        self._panel.list_widget.setCurrentRow(new_row)
         self._update_number_display()
         self._status.showMessage(
-            f"Requirement {num_str} captured  (unsaved)"
+            f"Requirement {req.number} captured  (unsaved)"
         )
 
     def _capture_clean(self, page_num: int, pdf_rect: tuple) -> Optional[QPixmap]:
@@ -1074,15 +1077,58 @@ class MainWindow(QMainWindow):
     # ===================== Numbering =======================================
 
     def _allocate_number(self) -> str:
+        existing = {req.number for req in self._requirements}
         if self._panel.sub_check.isChecked() and self._last_main > 0:
+            # skip sub-numbers already in use
+            while f"{self._last_main}.{self._next_sub}" in existing:
+                self._next_sub += 1
             num_str = f"{self._last_main}.{self._next_sub}"
             self._next_sub += 1
         else:
+            # skip main numbers already in use
+            while str(self._next_main) in existing:
+                self._next_main += 1
             num_str = str(self._next_main)
             self._last_main = self._next_main
             self._next_main += 1
             self._next_sub = 1
         return num_str
+
+    @staticmethod
+    def _req_sort_key(req):
+        """Sort key: '3' -> (3, 0), '3.1' -> (3, 1)."""
+        parts = req.number.split(".", 1)
+        try:
+            main = int(parts[0])
+            sub = int(parts[1]) if len(parts) > 1 else 0
+        except ValueError:
+            return (999999, 0)
+        return (main, sub)
+
+    def _sort_requirements(self):
+        """Sort requirements by number."""
+        self._requirements.sort(key=self._req_sort_key)
+
+    def _renumber_requirements(self):
+        """Sort then renumber all requirements sequentially, preserving main/sub structure."""
+        self._sort_requirements()
+        main_counter = 0
+        sub_counter = 0
+        current_main = 0
+        for req in self._requirements:
+            is_sub = "." in req.number
+            if is_sub:
+                sub_counter += 1
+                req.number = f"{current_main}.{sub_counter}"
+            else:
+                main_counter += 1
+                current_main = main_counter
+                sub_counter = 0
+                req.number = str(main_counter)
+        # update internal state to follow on from the last assigned numbers
+        self._next_main = main_counter + 1
+        self._last_main = current_main
+        self._next_sub = sub_counter + 1
 
     def _update_number_display(self):
         if self._panel.sub_check.isChecked() and self._last_main > 0:
@@ -1099,6 +1145,15 @@ class MainWindow(QMainWindow):
         """Handle user manually changing the next requirement number."""
         text = self._panel.next_num_edit.text().strip()
         if not text:
+            self._update_number_display()
+            return
+
+        # Check for duplicates against existing requirement numbers
+        existing = {req.number for req in self._requirements}
+        if text in existing:
+            self._status.showMessage(
+                f"Number '{text}' is already in use"
+            )
             self._update_number_display()
             return
 
@@ -1463,8 +1518,10 @@ class MainWindow(QMainWindow):
     def _delete_requirement(self, row: int):
         if 0 <= row < len(self._requirements):
             removed = self._requirements.pop(row)
+            self._renumber_requirements()
             self._rebuild_view()
             self._panel.refresh(self._requirements)
+            self._update_number_display()
             self._status.showMessage(
                 f"Deleted requirement {removed.number}  (unsaved)"
             )
