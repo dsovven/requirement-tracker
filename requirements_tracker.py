@@ -127,9 +127,9 @@ class PDFPageWidget(QWidget):
         painter = QPainter(self)
         painter.drawPixmap(0, 0, self._pixmap)
         if self._current_rect:
-            pen = QPen(QColor(220, 40, 40), 2, Qt.DashLine)
+            pen = QPen(QColor(137, 180, 250), 2, Qt.DashLine)
             painter.setPen(pen)
-            painter.setBrush(QBrush(QColor(220, 40, 40, 35)))
+            painter.setBrush(QBrush(QColor(137, 180, 250, 30)))
             painter.drawRect(self._current_rect)
 
     # -- mouse events ------------------------------------------------------
@@ -423,13 +423,15 @@ class ScreenshotEditorDialog(QDialog):
         self._btn_highlight.setCheckable(True)
         self._btn_highlight.setChecked(True)
         self._btn_highlight.setStyleSheet(
-            "QPushButton:checked { background: #fef08a; font-weight: bold; }"
+            "QPushButton:checked { background: #854d0e; color: #fef08a; "
+            "font-weight: bold; border-color: #fef08a; }"
         )
 
         self._btn_whiteout = QPushButton("White-out")
         self._btn_whiteout.setCheckable(True)
         self._btn_whiteout.setStyleSheet(
-            "QPushButton:checked { background: #e5e5e5; font-weight: bold; }"
+            "QPushButton:checked { background: #45475a; color: #cdd6f4; "
+            "font-weight: bold; border-color: #cdd6f4; }"
         )
 
         self._tool_group = QButtonGroup(self)
@@ -444,17 +446,18 @@ class ScreenshotEditorDialog(QDialog):
 
         # highlight color buttons
         self._highlight_colors = [
-            ("Yellow", QColor(255, 255, 0), "#fef08a"),
-            ("Orange", QColor(255, 165, 0), "#fed7aa"),
-            ("Green", QColor(0, 255, 0), "#bbf7d0"),
+            ("Yellow", QColor(255, 255, 0), "#854d0e", "#fef08a"),
+            ("Orange", QColor(255, 165, 0), "#7c2d12", "#fed7aa"),
+            ("Green", QColor(0, 255, 0), "#14532d", "#bbf7d0"),
         ]
         self._color_group = QButtonGroup(self)
         self._color_group.setExclusive(True)
-        for i, (name, _qc, bg) in enumerate(self._highlight_colors):
+        for i, (name, _qc, bg_dark, fg) in enumerate(self._highlight_colors):
             btn = QPushButton(name)
             btn.setCheckable(True)
             btn.setStyleSheet(
-                f"QPushButton:checked {{ background: {bg}; font-weight: bold; }}"
+                f"QPushButton:checked {{ background: {bg_dark}; color: {fg}; "
+                f"font-weight: bold; border-color: {fg}; }}"
             )
             if i == 0:
                 btn.setChecked(True)
@@ -467,14 +470,16 @@ class ScreenshotEditorDialog(QDialog):
         self._btn_brush = QPushButton("Brush")
         self._btn_brush.setCheckable(True)
         self._btn_brush.setStyleSheet(
-            "QPushButton:checked { background: #bfdbfe; font-weight: bold; }"
+            "QPushButton:checked { background: #1e3a5f; color: #89b4fa; "
+            "font-weight: bold; border-color: #89b4fa; }"
         )
 
         self._btn_rect = QPushButton("Rectangle")
         self._btn_rect.setCheckable(True)
         self._btn_rect.setChecked(True)
         self._btn_rect.setStyleSheet(
-            "QPushButton:checked { background: #bfdbfe; font-weight: bold; }"
+            "QPushButton:checked { background: #1e3a5f; color: #89b4fa; "
+            "font-weight: bold; border-color: #89b4fa; }"
         )
 
         self._mode_group = QButtonGroup(self)
@@ -508,7 +513,10 @@ class ScreenshotEditorDialog(QDialog):
 
         self._btn_save = QPushButton("Save")
         self._btn_save.setStyleSheet(
-            "background: #2563eb; color: white; font-weight: bold; padding: 6px 20px;"
+            "QPushButton { background: #89b4fa; color: #11111b; font-weight: bold; "
+            "padding: 6px 20px; border: none; border-radius: 6px; }"
+            "QPushButton:hover { background: #b4d0fb; }"
+            "QPushButton:pressed { background: #74a8f7; }"
         )
         self._btn_cancel = QPushButton("Cancel")
 
@@ -542,7 +550,7 @@ class ScreenshotEditorDialog(QDialog):
         self._canvas.tool = "highlight" if btn_id == 0 else "whiteout"
 
     def _on_color_changed(self, btn_id):
-        _name, qc, _bg = self._highlight_colors[btn_id]
+        _name, qc, _bg, _fg = self._highlight_colors[btn_id]
         self._canvas.highlight_color = qc
 
     def _on_mode_changed(self, btn_id):
@@ -697,16 +705,23 @@ class ReqItemWidget(QWidget):
 
     def __init__(self, req: Requirement, parent=None):
         super().__init__(parent)
+        self.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(10)
 
+        # number badge
         num = QLabel(req.number)
-        num.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        num.setFont(QFont("Segoe UI", 12, QFont.Bold))
         r, g, b = req.markup_color
-        num.setStyleSheet(f"color: rgb({int(r*255)},{int(g*255)},{int(b*255)});")
-        num.setFixedWidth(55)
+        hexc = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+        num.setStyleSheet(
+            f"color: {hexc}; background: transparent;"
+        )
+        num.setFixedWidth(48)
         num.setAlignment(Qt.AlignCenter)
 
+        # thumbnail with rounded border
         thumb = QLabel()
         scaled = req.screenshot.scaled(
             120, 80, Qt.KeepAspectRatio, Qt.SmoothTransformation
@@ -714,24 +729,36 @@ class ReqItemWidget(QWidget):
         thumb.setPixmap(scaled)
         thumb.setFixedSize(120, 80)
         thumb.setAlignment(Qt.AlignCenter)
-        thumb.setStyleSheet("border: 1px solid #bbb;")
+        thumb.setStyleSheet(
+            "border: 1px solid #45475a; border-radius: 4px; "
+            "background: #11111b;"
+        )
+
+        # right column: page info + notes
+        right_col = QVBoxLayout()
+        right_col.setSpacing(2)
 
         info = QLabel(f"Page {req.page + 1}")
         info.setFont(QFont("Segoe UI", 9))
+        info.setStyleSheet("color: #a6adc8; background: transparent;")
         info.setAlignment(Qt.AlignCenter)
-        info.setFixedWidth(55)
+        right_col.addWidget(info)
+
+        if req.notes:
+            notes_lbl = QLabel("notes")
+            notes_lbl.setFont(QFont("Segoe UI", 8))
+            notes_lbl.setStyleSheet(
+                "color: #89b4fa; background: transparent;"
+            )
+            notes_lbl.setToolTip(req.notes[:200])
+            notes_lbl.setAlignment(Qt.AlignCenter)
+            right_col.addWidget(notes_lbl)
+
+        right_col.addStretch()
 
         layout.addWidget(num)
         layout.addWidget(thumb)
-        layout.addWidget(info)
-
-        if req.notes:
-            notes_lbl = QLabel("[N]")
-            notes_lbl.setFont(QFont("Segoe UI", 8))
-            notes_lbl.setStyleSheet("color: #666;")
-            notes_lbl.setToolTip(req.notes[:200])
-            notes_lbl.setFixedWidth(22)
-            layout.addWidget(notes_lbl)
+        layout.addLayout(right_col)
 
 
 # ---------------------------------------------------------------------------
@@ -750,18 +777,21 @@ class RequirementsPanel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setStyleSheet("RequirementsPanel { background: #1e1e2e; }")
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         # -- numbering controls ---
         ctrl_group = QGroupBox("Capture Controls")
         ctrl_layout = QFormLayout(ctrl_group)
 
         self.next_num_edit = QLineEdit()
-        self.next_num_edit.setFont(QFont("Segoe UI", 12, QFont.Bold))
+        self.next_num_edit.setFont(QFont("Segoe UI", 13, QFont.Bold))
         self.next_num_edit.setAlignment(Qt.AlignCenter)
         self.next_num_edit.setStyleSheet(
-            "background: #fff; color: #c0392b; border: 2px solid #c0392b; "
-            "border-radius: 4px; padding: 4px;"
+            "background: #181825; color: #f38ba8; border: 2px solid #f38ba8; "
+            "border-radius: 6px; padding: 6px;"
         )
         ctrl_layout.addRow("Next Req #:", self.next_num_edit)
 
@@ -783,9 +813,10 @@ class RequirementsPanel(QWidget):
             btn.setCheckable(True)
             btn.setToolTip(name)
             btn.setStyleSheet(
-                f"QPushButton {{ background: {hexc}; border: 2px solid #888; "
-                f"border-radius: 4px; }}"
-                f"QPushButton:checked {{ border: 3px solid #000; }}"
+                f"QPushButton {{ background: {hexc}; border: 2px solid #45475a; "
+                f"border-radius: 14px; }}"
+                f"QPushButton:checked {{ border: 3px solid #cdd6f4; }}"
+                f"QPushButton:hover {{ border-color: #89b4fa; }}"
             )
             if i == 0:
                 btn.setChecked(True)
@@ -807,7 +838,7 @@ class RequirementsPanel(QWidget):
 
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QListWidget.ExtendedSelection)
-        self.list_widget.setSpacing(2)
+        self.list_widget.setSpacing(3)
         self.list_widget.setContextMenuPolicy(Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(
             self._show_context_menu
@@ -815,6 +846,12 @@ class RequirementsPanel(QWidget):
         layout.addWidget(self.list_widget, 1)
 
         self.delete_btn = QPushButton("Delete Selected")
+        self.delete_btn.setStyleSheet(
+            "QPushButton { background: #45273a; color: #f38ba8; "
+            "border: 1px solid #f38ba850; border-radius: 6px; padding: 6px 16px; }"
+            "QPushButton:hover { background: #5a2e48; border-color: #f38ba8; }"
+            "QPushButton:pressed { background: #6b354f; }"
+        )
         self.delete_btn.clicked.connect(self._on_delete)
         layout.addWidget(self.delete_btn)
 
@@ -834,8 +871,8 @@ class RequirementsPanel(QWidget):
         self.selected_markup_color = rgb
         self._markup_hex = hexc
         self.next_num_edit.setStyleSheet(
-            f"background: #fff; color: {hexc}; border: 2px solid {hexc}; "
-            "border-radius: 4px; padding: 4px;"
+            f"background: #181825; color: {hexc}; border: 2px solid {hexc}; "
+            "border-radius: 6px; padding: 6px;"
         )
 
     def _on_delete(self):
@@ -1980,16 +2017,279 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # light stylesheet
+    # dark theme stylesheet
     app.setStyleSheet("""
-        QMainWindow { background: #f5f5f5; }
-        QToolBar { background: #e8e8e8; spacing: 6px; padding: 4px; }
-        QGroupBox { font-weight: bold; margin-top: 8px; }
-        QGroupBox::title { subcontrol-origin: margin; left: 8px; }
-        QListWidget { background: #fff; border: 1px solid #ccc; }
-        QListWidget::item:selected { background: #dbeafe; }
-        QPushButton { padding: 6px 14px; }
-        QStatusBar { background: #e8e8e8; }
+        * {
+            font-family: "Segoe UI", "Inter", sans-serif;
+        }
+
+        QMainWindow {
+            background: #181825;
+        }
+
+        QToolBar {
+            background: #1e1e2e;
+            border-bottom: 1px solid #313244;
+            spacing: 8px;
+            padding: 6px 8px;
+        }
+        QToolBar QLabel {
+            color: #cdd6f4;
+        }
+        QToolBar::separator {
+            width: 1px;
+            background: #313244;
+            margin: 4px 6px;
+        }
+
+        QToolBar QToolButton {
+            color: #cdd6f4;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            padding: 5px 10px;
+        }
+        QToolBar QToolButton:hover {
+            background: #313244;
+            border-color: #45475a;
+        }
+        QToolBar QToolButton:pressed {
+            background: #45475a;
+        }
+
+        QGroupBox {
+            font-weight: bold;
+            color: #cdd6f4;
+            background: #1e1e2e;
+            border: 1px solid #313244;
+            border-radius: 8px;
+            margin-top: 12px;
+            padding-top: 16px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 12px;
+            padding: 0 6px;
+            color: #a6adc8;
+        }
+
+        QLabel {
+            color: #cdd6f4;
+        }
+
+        QLineEdit {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            border: 1px solid #313244;
+            border-radius: 6px;
+            padding: 6px 8px;
+            selection-background-color: #45475a;
+        }
+        QLineEdit:focus {
+            border-color: #89b4fa;
+        }
+
+        QCheckBox {
+            color: #cdd6f4;
+            spacing: 6px;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 1px solid #45475a;
+            border-radius: 4px;
+            background: #1e1e2e;
+        }
+        QCheckBox::indicator:checked {
+            background: #89b4fa;
+            border-color: #89b4fa;
+        }
+
+        QListWidget {
+            background: #181825;
+            border: 1px solid #313244;
+            border-radius: 8px;
+            outline: none;
+            padding: 4px;
+        }
+        QListWidget::item {
+            background: #1e1e2e;
+            border: 1px solid #313244;
+            border-radius: 8px;
+            margin: 2px 0px;
+        }
+        QListWidget::item:selected {
+            background: #2a2a4a;
+            border-color: #89b4fa;
+        }
+        QListWidget::item:hover {
+            background: #232340;
+            border-color: #45475a;
+        }
+
+        QPushButton {
+            background: #313244;
+            color: #cdd6f4;
+            border: 1px solid #45475a;
+            border-radius: 6px;
+            padding: 6px 16px;
+            font-weight: 500;
+        }
+        QPushButton:hover {
+            background: #45475a;
+            border-color: #585b70;
+        }
+        QPushButton:pressed {
+            background: #585b70;
+        }
+        QPushButton:disabled {
+            background: #1e1e2e;
+            color: #585b70;
+            border-color: #313244;
+        }
+
+        QStatusBar {
+            background: #11111b;
+            color: #a6adc8;
+            border-top: 1px solid #313244;
+            padding: 4px 8px;
+        }
+
+        QSplitter::handle {
+            background: #313244;
+            width: 2px;
+        }
+        QSplitter::handle:hover {
+            background: #89b4fa;
+        }
+
+        QScrollArea {
+            background: #181825;
+            border: none;
+        }
+
+        QScrollBar:vertical {
+            background: #181825;
+            width: 10px;
+            border: none;
+            border-radius: 5px;
+        }
+        QScrollBar::handle:vertical {
+            background: #313244;
+            min-height: 30px;
+            border-radius: 5px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #45475a;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
+        }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            background: none;
+        }
+        QScrollBar:horizontal {
+            background: #181825;
+            height: 10px;
+            border: none;
+            border-radius: 5px;
+        }
+        QScrollBar::handle:horizontal {
+            background: #313244;
+            min-width: 30px;
+            border-radius: 5px;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background: #45475a;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            width: 0px;
+        }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+            background: none;
+        }
+
+        QMenu {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            border: 1px solid #313244;
+            border-radius: 8px;
+            padding: 4px;
+        }
+        QMenu::item {
+            padding: 6px 24px 6px 12px;
+            border-radius: 4px;
+        }
+        QMenu::item:selected {
+            background: #313244;
+        }
+        QMenu::separator {
+            height: 1px;
+            background: #313244;
+            margin: 4px 8px;
+        }
+
+        QDialog {
+            background: #1e1e2e;
+        }
+
+        QTextEdit {
+            background: #181825;
+            color: #cdd6f4;
+            border: 1px solid #313244;
+            border-radius: 6px;
+            padding: 6px;
+            selection-background-color: #45475a;
+        }
+        QTextEdit:focus {
+            border-color: #89b4fa;
+        }
+
+        QSlider::groove:horizontal {
+            background: #313244;
+            height: 6px;
+            border-radius: 3px;
+        }
+        QSlider::handle:horizontal {
+            background: #89b4fa;
+            width: 16px;
+            height: 16px;
+            margin: -5px 0;
+            border-radius: 8px;
+        }
+        QSlider::handle:horizontal:hover {
+            background: #b4d0fb;
+        }
+
+        QToolTip {
+            background: #313244;
+            color: #cdd6f4;
+            border: 1px solid #45475a;
+            border-radius: 4px;
+            padding: 4px 8px;
+        }
+
+        QMessageBox {
+            background: #1e1e2e;
+        }
+        QMessageBox QLabel {
+            color: #cdd6f4;
+        }
+
+        QInputDialog {
+            background: #1e1e2e;
+        }
+
+        QSpinBox {
+            background: #1e1e2e;
+            color: #cdd6f4;
+            border: 1px solid #313244;
+            border-radius: 6px;
+            padding: 4px 8px;
+        }
+        QSpinBox:focus {
+            border-color: #89b4fa;
+        }
     """)
 
     window = MainWindow()
