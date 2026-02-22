@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
     QGraphicsView, QGraphicsScene, QToolBar, QAction, QFileDialog,
     QLabel, QLineEdit, QCheckBox, QListWidget, QListWidgetItem,
     QSplitter, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
-    QStyle, QGroupBox, QFormLayout
+    QStyle, QGroupBox, QFormLayout, QDialog, QSlider, QButtonGroup
 )
 from PyQt5.QtCore import (
     Qt, QRectF, QRect, QPoint, QSize, pyqtSignal, QBuffer, QByteArray
@@ -142,6 +142,186 @@ class ZoomScrollArea(QScrollArea):
             event.accept()
         else:
             super().wheelEvent(event)
+
+
+# ---------------------------------------------------------------------------
+# Screenshot Editor Dialog  (highlight / white-out annotation)
+# ---------------------------------------------------------------------------
+
+class _EditorCanvas(QLabel):
+    """Label that supports freehand drawing on its pixmap."""
+
+    def __init__(self, pixmap: QPixmap, parent=None):
+        super().__init__(parent)
+        self._pixmap = pixmap.copy()
+        self.setPixmap(self._pixmap)
+        self.setFixedSize(pixmap.size())
+        self.setCursor(Qt.CrossCursor)
+
+        self._drawing = False
+        self._last_point: Optional[QPoint] = None
+        self._undo_stack: list = []  # list[QPixmap]
+        self._max_undo = 20
+
+        # tool settings (set by parent dialog)
+        self.brush_size = 20
+        self.tool = "highlight"  # "highlight" or "whiteout"
+
+    def get_pixmap(self) -> QPixmap:
+        return self._pixmap.copy()
+
+    def undo(self):
+        if self._undo_stack:
+            self._pixmap = self._undo_stack.pop()
+            self.setPixmap(self._pixmap)
+
+    def _push_undo(self):
+        if len(self._undo_stack) >= self._max_undo:
+            self._undo_stack.pop(0)
+        self._undo_stack.append(self._pixmap.copy())
+
+    def _draw_at(self, pos: QPoint):
+        painter = QPainter(self._pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if self.tool == "highlight":
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 255, 0, 80))
+        else:
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 255))
+        r = self.brush_size / 2
+        painter.drawEllipse(pos, r, r)
+        painter.end()
+        self.setPixmap(self._pixmap)
+
+    def _draw_line(self, p1: QPoint, p2: QPoint):
+        painter = QPainter(self._pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        if self.tool == "highlight":
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            pen = QPen(QColor(255, 255, 0, 80), self.brush_size,
+                       Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        else:
+            painter.setCompositionMode(QPainter.CompositionMode_Source)
+            pen = QPen(QColor(255, 255, 255, 255), self.brush_size,
+                       Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(p1, p2)
+        painter.end()
+        self.setPixmap(self._pixmap)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._push_undo()
+            self._drawing = True
+            self._last_point = event.pos()
+            self._draw_at(event.pos())
+
+    def mouseMoveEvent(self, event):
+        if self._drawing and self._last_point:
+            self._draw_line(self._last_point, event.pos())
+            self._last_point = event.pos()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drawing = False
+            self._last_point = None
+
+
+class ScreenshotEditorDialog(QDialog):
+    """Dialog for annotating a screenshot with highlight or white-out."""
+
+    def __init__(self, pixmap: QPixmap, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Screenshot")
+        self.setMinimumSize(600, 400)
+        self.resize(
+            min(pixmap.width() + 60, 1200),
+            min(pixmap.height() + 100, 800),
+        )
+
+        layout = QVBoxLayout(self)
+
+        # -- toolbar row --
+        toolbar = QHBoxLayout()
+
+        self._btn_highlight = QPushButton("Highlight")
+        self._btn_highlight.setCheckable(True)
+        self._btn_highlight.setChecked(True)
+        self._btn_highlight.setStyleSheet(
+            "QPushButton:checked { background: #fef08a; font-weight: bold; }"
+        )
+
+        self._btn_whiteout = QPushButton("White-out")
+        self._btn_whiteout.setCheckable(True)
+        self._btn_whiteout.setStyleSheet(
+            "QPushButton:checked { background: #e5e5e5; font-weight: bold; }"
+        )
+
+        self._tool_group = QButtonGroup(self)
+        self._tool_group.setExclusive(True)
+        self._tool_group.addButton(self._btn_highlight, 0)
+        self._tool_group.addButton(self._btn_whiteout, 1)
+
+        toolbar.addWidget(self._btn_highlight)
+        toolbar.addWidget(self._btn_whiteout)
+
+        toolbar.addSpacing(16)
+
+        toolbar.addWidget(QLabel("Brush:"))
+        self._size_slider = QSlider(Qt.Horizontal)
+        self._size_slider.setRange(5, 50)
+        self._size_slider.setValue(20)
+        self._size_slider.setFixedWidth(120)
+        toolbar.addWidget(self._size_slider)
+
+        self._size_label = QLabel("20px")
+        self._size_label.setFixedWidth(40)
+        toolbar.addWidget(self._size_label)
+
+        toolbar.addSpacing(16)
+
+        self._btn_undo = QPushButton("Undo")
+        toolbar.addWidget(self._btn_undo)
+
+        toolbar.addStretch()
+
+        self._btn_save = QPushButton("Save")
+        self._btn_save.setStyleSheet(
+            "background: #2563eb; color: white; font-weight: bold; padding: 6px 20px;"
+        )
+        self._btn_cancel = QPushButton("Cancel")
+
+        toolbar.addWidget(self._btn_save)
+        toolbar.addWidget(self._btn_cancel)
+
+        layout.addLayout(toolbar)
+
+        # -- canvas in scroll area --
+        self._canvas = _EditorCanvas(pixmap)
+        scroll = QScrollArea()
+        scroll.setWidget(self._canvas)
+        scroll.setAlignment(Qt.AlignCenter)
+        layout.addWidget(scroll, 1)
+
+        # -- connections --
+        self._tool_group.buttonClicked[int].connect(self._on_tool_changed)
+        self._size_slider.valueChanged.connect(self._on_size_changed)
+        self._btn_undo.clicked.connect(self._canvas.undo)
+        self._btn_save.clicked.connect(self.accept)
+        self._btn_cancel.clicked.connect(self.reject)
+
+    def _on_tool_changed(self, btn_id):
+        self._canvas.tool = "highlight" if btn_id == 0 else "whiteout"
+
+    def _on_size_changed(self, val):
+        self._canvas.brush_size = val
+        self._size_label.setText(f"{val}px")
+
+    def get_pixmap(self) -> QPixmap:
+        return self._canvas.get_pixmap()
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +484,7 @@ class RequirementsPanel(QWidget):
     """Sidebar listing captured requirements + numbering controls."""
 
     delete_requested = pyqtSignal(int)  # list row index
+    edit_requested = pyqtSignal(int)    # list row index (double-click)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -346,6 +527,8 @@ class RequirementsPanel(QWidget):
         self.delete_btn.clicked.connect(self._on_delete)
         layout.addWidget(self.delete_btn)
 
+        self.list_widget.itemDoubleClicked.connect(self._on_double_click)
+
     def refresh(self, requirements: List[Requirement]):
         self.list_widget.clear()
         for req in requirements:
@@ -359,6 +542,11 @@ class RequirementsPanel(QWidget):
         row = self.list_widget.currentRow()
         if row >= 0:
             self.delete_requested.emit(row)
+
+    def _on_double_click(self, item):
+        row = self.list_widget.row(item)
+        if row >= 0:
+            self.edit_requested.emit(row)
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +659,7 @@ class MainWindow(QMainWindow):
         self._panel.sub_check.stateChanged.connect(
             lambda _: self._update_number_display()
         )
+        self._panel.edit_requested.connect(self._edit_screenshot)
         self._panel.list_widget.currentRowChanged.connect(
             self._on_list_selection_changed
         )
@@ -787,6 +976,22 @@ class MainWindow(QMainWindow):
             self._panel.refresh(self._requirements)
             self._status.showMessage(
                 f"Deleted requirement {removed.number}  (unsaved)"
+            )
+
+    # ===================== Screenshot editing ================================
+
+    def _edit_screenshot(self, row: int):
+        if not (0 <= row < len(self._requirements)):
+            return
+        req = self._requirements[row]
+        dlg = ScreenshotEditorDialog(req.screenshot, self)
+        if dlg.exec_() == QDialog.Accepted:
+            req.screenshot = dlg.get_pixmap()
+            self._panel.refresh(self._requirements)
+            self._panel.list_widget.setCurrentRow(row)
+            self._unsaved_changes = True
+            self._status.showMessage(
+                f"Requirement {req.number} screenshot edited  (unsaved)"
             )
 
     # ===================== Navigation / UI updates =========================
