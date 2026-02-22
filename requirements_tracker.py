@@ -1060,7 +1060,8 @@ class MainWindow(QMainWindow):
         # prompt for path if not yet chosen
         if not self._markup_path:
             base = os.path.splitext(self._pdf_path)[0]
-            default = base + "_markup.pdf"
+            date_str = datetime.now().strftime("%Y.%m.%d")
+            default = f"{base} {date_str}_markup.pdf"
             path, _ = QFileDialog.getSaveFileName(
                 self, "Save Marked-Up PDF As", default,
                 "PDF Files (*.pdf)"
@@ -1151,7 +1152,7 @@ class MainWindow(QMainWindow):
             name = "requirements"
             directory = ""
         date_str = datetime.now().strftime("%Y.%m.%d")
-        base = os.path.join(directory, f"{name} {date_str} RQMT")
+        base = os.path.join(directory, f"{name} RQMT {date_str}")
         return base
 
     def _auto_export_docx(self):
