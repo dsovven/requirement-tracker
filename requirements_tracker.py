@@ -37,6 +37,13 @@ try:
 except ImportError:
     HAS_DOCX = False
 
+try:
+    import pytesseract
+    from PIL import Image
+    HAS_TESSERACT = True
+except ImportError:
+    HAS_TESSERACT = False
+
 
 # ---------------------------------------------------------------------------
 # Data
@@ -48,6 +55,7 @@ class Requirement:
     screenshot: QPixmap  # cropped image of the requirement area
     page: int            # 0-based page index
     pdf_rect: tuple      # (x0, y0, x1, y1) in PDF points
+    text: str = ""       # extracted text from the captured region
 
 
 def pixmap_to_bytes(pixmap: QPixmap) -> BytesIO:
@@ -723,6 +731,9 @@ class MainWindow(QMainWindow):
         if screenshot is None or screenshot.isNull():
             return
 
+        # extract text from the captured region
+        extracted = self._extract_text(page_num, pdf_rect, screenshot)
+
         # determine requirement number
         num_str = self._allocate_number()
 
@@ -731,6 +742,7 @@ class MainWindow(QMainWindow):
             screenshot=screenshot,
             page=page_num,
             pdf_rect=pdf_rect,
+            text=extracted,
         )
         self._requirements.append(req)
 
@@ -760,6 +772,37 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Capture Error", str(e))
             return None
+
+    def _extract_text(self, page_num: int, pdf_rect: tuple,
+                      screenshot: QPixmap) -> str:
+        """Extract text from the selected PDF region.
+
+        Tries native PDF text extraction first. Falls back to OCR if the
+        result is empty and pytesseract is available.
+        """
+        text = ""
+        # 1) Native PDF text extraction
+        try:
+            doc = fitz.open(stream=self._original_bytes, filetype="pdf")
+            page = doc[page_num]
+            text = page.get_text("text", clip=fitz.Rect(pdf_rect))
+            doc.close()
+        except Exception:
+            pass
+
+        if text.strip():
+            return text.strip()
+
+        # 2) OCR fallback via pytesseract
+        if HAS_TESSERACT:
+            try:
+                bio = pixmap_to_bytes(screenshot)
+                pil_img = Image.open(bio)
+                text = pytesseract.image_to_string(pil_img)
+            except Exception:
+                pass
+
+        return text.strip()
 
     # ===================== Numbering =======================================
 
@@ -938,9 +981,9 @@ class MainWindow(QMainWindow):
             doc.add_paragraph("")
 
             # table
-            table = doc.add_table(rows=1, cols=4)
+            table = doc.add_table(rows=1, cols=5)
             table.style = "Table Grid"
-            headers = ["Req #", "Screenshot", "Page", "Notes"]
+            headers = ["Req #", "Screenshot", "Extracted Text", "Page", "Notes"]
             for i, h in enumerate(headers):
                 cell = table.rows[0].cells[i]
                 cell.text = h
@@ -958,8 +1001,9 @@ class MainWindow(QMainWindow):
                 run = paragraph.add_run()
                 run.add_picture(img_io, width=Inches(3.5))
 
-                row.cells[2].text = str(req.page + 1)
-                row.cells[3].text = ""
+                row.cells[2].text = req.text
+                row.cells[3].text = str(req.page + 1)
+                row.cells[4].text = ""
 
             doc.save(path)
         except Exception as e:
