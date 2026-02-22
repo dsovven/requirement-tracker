@@ -58,6 +58,16 @@ except ImportError:
 # Data
 # ---------------------------------------------------------------------------
 
+# Preset colors for markup stamp and outline (name, RGB 0-1 tuple, hex for UI)
+MARKUP_COLORS = [
+    ("Red",     (0.85, 0.15, 0.15), "#d92626"),
+    ("Blue",    (0.15, 0.30, 0.85), "#264dd9"),
+    ("Green",   (0.10, 0.55, 0.20), "#1a8c33"),
+    ("Purple",  (0.55, 0.15, 0.70), "#8c26b3"),
+    ("Orange",  (0.90, 0.45, 0.05), "#e6730d"),
+]
+
+
 @dataclass
 class Requirement:
     number: str          # "1", "2", "7.1", etc.
@@ -66,6 +76,8 @@ class Requirement:
     pdf_rect: tuple      # (x0, y0, x1, y1) in PDF points
     text: str = ""       # extracted text from the captured region
     edited: bool = False # True if screenshot was modified in the editor
+    highlight_pixmap: Optional[QPixmap] = None  # screenshot with highlights only (no white-out)
+    markup_color: tuple = (0.85, 0.15, 0.15)  # RGB for stamp/outline on PDF
 
 
 def pixmap_to_bytes(pixmap: QPixmap) -> BytesIO:
@@ -174,6 +186,7 @@ class _EditorCanvas(QLabel):
     def __init__(self, pixmap: QPixmap, parent=None):
         super().__init__(parent)
         self._pixmap = pixmap.copy()
+        self._original = pixmap.copy()  # pristine copy for highlight-only export
         self.setPixmap(self._pixmap)
         self.setFixedSize(pixmap.size())
         self.setCursor(Qt.CrossCursor)
@@ -184,6 +197,10 @@ class _EditorCanvas(QLabel):
         self._undo_stack: list = []  # list[QPixmap]
         self._max_undo = 20
 
+        # cumulative highlight-only layer (transparent, only highlight strokes)
+        self._highlight_layer = QPixmap(pixmap.size())
+        self._highlight_layer.fill(Qt.transparent)
+
         # stroke overlay for highlight (prevents alpha accumulation)
         self._stroke_base: Optional[QPixmap] = None
         self._stroke_overlay: Optional[QPixmap] = None
@@ -191,10 +208,20 @@ class _EditorCanvas(QLabel):
         # tool settings (set by parent dialog)
         self.brush_size = 20
         self.tool = "highlight"  # "highlight" or "whiteout"
-        self.draw_mode = "brush"  # "brush" or "rectangle"
+        self.draw_mode = "rectangle"  # "brush" or "rectangle"
+        self.highlight_color = QColor(255, 255, 0)  # yellow default
 
     def get_pixmap(self) -> QPixmap:
         return self._pixmap.copy()
+
+    def get_highlight_pixmap(self) -> QPixmap:
+        """Return the original screenshot with only highlights composited."""
+        result = self._original.copy()
+        painter = QPainter(result)
+        painter.setOpacity(self.HIGHLIGHT_ALPHA)
+        painter.drawPixmap(0, 0, self._highlight_layer)
+        painter.end()
+        return result
 
     def undo(self):
         if self._undo_stack:
@@ -215,16 +242,16 @@ class _EditorCanvas(QLabel):
         self._stroke_overlay.fill(Qt.transparent)
 
     def _draw_highlight_on_overlay(self, p1: QPoint, p2: QPoint = None):
-        """Draw solid yellow onto the overlay (no alpha — alpha applied at composite)."""
+        """Draw highlight color onto the overlay (no alpha — alpha applied at composite)."""
         painter = QPainter(self._stroke_overlay)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(255, 255, 0))
+        painter.setBrush(self.highlight_color)
         if p2 is None:
             r = self.brush_size / 2
             painter.drawEllipse(p1, r, r)
         else:
-            pen = QPen(QColor(255, 255, 0), self.brush_size,
+            pen = QPen(self.highlight_color, self.brush_size,
                        Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             painter.setPen(pen)
             painter.drawLine(p1, p2)
@@ -232,11 +259,11 @@ class _EditorCanvas(QLabel):
         self._composite_highlight()
 
     def _draw_highlight_rect_on_overlay(self, rect: QRect):
-        """Draw a filled yellow rectangle onto the overlay."""
+        """Draw a filled highlight rectangle onto the overlay."""
         self._stroke_overlay.fill(Qt.transparent)
         painter = QPainter(self._stroke_overlay)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor(255, 255, 0))
+        painter.setBrush(self.highlight_color)
         painter.drawRect(rect)
         painter.end()
         self._composite_highlight()
@@ -251,7 +278,11 @@ class _EditorCanvas(QLabel):
         self.setPixmap(self._pixmap)
 
     def _finish_highlight_stroke(self):
-        """Bake the composited result and clear overlay state."""
+        """Bake the composited result and accumulate onto highlight layer."""
+        if self._stroke_overlay is not None:
+            painter = QPainter(self._highlight_layer)
+            painter.drawPixmap(0, 0, self._stroke_overlay)
+            painter.end()
         self._stroke_base = None
         self._stroke_overlay = None
 
@@ -407,16 +438,37 @@ class ScreenshotEditorDialog(QDialog):
 
         toolbar.addSpacing(16)
 
+        # highlight color buttons
+        self._highlight_colors = [
+            ("Yellow", QColor(255, 255, 0), "#fef08a"),
+            ("Orange", QColor(255, 165, 0), "#fed7aa"),
+            ("Green", QColor(0, 255, 0), "#bbf7d0"),
+        ]
+        self._color_group = QButtonGroup(self)
+        self._color_group.setExclusive(True)
+        for i, (name, _qc, bg) in enumerate(self._highlight_colors):
+            btn = QPushButton(name)
+            btn.setCheckable(True)
+            btn.setStyleSheet(
+                f"QPushButton:checked {{ background: {bg}; font-weight: bold; }}"
+            )
+            if i == 0:
+                btn.setChecked(True)
+            self._color_group.addButton(btn, i)
+            toolbar.addWidget(btn)
+
+        toolbar.addSpacing(16)
+
         # draw mode toggle
         self._btn_brush = QPushButton("Brush")
         self._btn_brush.setCheckable(True)
-        self._btn_brush.setChecked(True)
         self._btn_brush.setStyleSheet(
             "QPushButton:checked { background: #bfdbfe; font-weight: bold; }"
         )
 
         self._btn_rect = QPushButton("Rectangle")
         self._btn_rect.setCheckable(True)
+        self._btn_rect.setChecked(True)
         self._btn_rect.setStyleSheet(
             "QPushButton:checked { background: #bfdbfe; font-weight: bold; }"
         )
@@ -470,14 +522,24 @@ class ScreenshotEditorDialog(QDialog):
 
         # -- connections --
         self._tool_group.buttonClicked[int].connect(self._on_tool_changed)
+        self._color_group.buttonClicked[int].connect(self._on_color_changed)
         self._mode_group.buttonClicked[int].connect(self._on_mode_changed)
         self._size_slider.valueChanged.connect(self._on_size_changed)
         self._btn_undo.clicked.connect(self._canvas.undo)
         self._btn_save.clicked.connect(self.accept)
         self._btn_cancel.clicked.connect(self.reject)
 
+        # apply initial defaults (rectangle mode — disable brush size)
+        self._size_slider.setEnabled(False)
+        self._brush_size_label.setEnabled(False)
+        self._size_label.setEnabled(False)
+
     def _on_tool_changed(self, btn_id):
         self._canvas.tool = "highlight" if btn_id == 0 else "whiteout"
+
+    def _on_color_changed(self, btn_id):
+        _name, qc, _bg = self._highlight_colors[btn_id]
+        self._canvas.highlight_color = qc
 
     def _on_mode_changed(self, btn_id):
         self._canvas.draw_mode = "brush" if btn_id == 0 else "rectangle"
@@ -492,6 +554,10 @@ class ScreenshotEditorDialog(QDialog):
 
     def get_pixmap(self) -> QPixmap:
         return self._canvas.get_pixmap()
+
+    def get_highlight_pixmap(self) -> QPixmap:
+        """Return original screenshot with only highlights applied (no white-out)."""
+        return self._canvas.get_highlight_pixmap()
 
 
 # ---------------------------------------------------------------------------
@@ -623,7 +689,8 @@ class ReqItemWidget(QWidget):
 
         num = QLabel(req.number)
         num.setFont(QFont("Segoe UI", 11, QFont.Bold))
-        num.setStyleSheet("color: #c0392b;")
+        r, g, b = req.markup_color
+        num.setStyleSheet(f"color: rgb({int(r*255)},{int(g*255)},{int(b*255)});")
         num.setFixedWidth(55)
         num.setAlignment(Qt.AlignCenter)
 
@@ -665,7 +732,6 @@ class RequirementsPanel(QWidget):
         ctrl_layout = QFormLayout(ctrl_group)
 
         self.next_num_edit = QLineEdit()
-        self.next_num_edit.setReadOnly(True)
         self.next_num_edit.setFont(QFont("Segoe UI", 12, QFont.Bold))
         self.next_num_edit.setAlignment(Qt.AlignCenter)
         self.next_num_edit.setStyleSheet(
@@ -680,6 +746,32 @@ class RequirementsPanel(QWidget):
         self.sub_parent_label = QLabel("")
         self.sub_parent_label.setFont(QFont("Segoe UI", 9))
         ctrl_layout.addRow(self.sub_parent_label)
+
+        # -- markup color selector --
+        color_row = QHBoxLayout()
+        self._color_group = QButtonGroup(self)
+        self._color_group.setExclusive(True)
+        self._markup_colors = MARKUP_COLORS
+        for i, (name, _rgb, hexc) in enumerate(MARKUP_COLORS):
+            btn = QPushButton()
+            btn.setFixedSize(28, 28)
+            btn.setCheckable(True)
+            btn.setToolTip(name)
+            btn.setStyleSheet(
+                f"QPushButton {{ background: {hexc}; border: 2px solid #888; "
+                f"border-radius: 4px; }}"
+                f"QPushButton:checked {{ border: 3px solid #000; }}"
+            )
+            if i == 0:
+                btn.setChecked(True)
+            self._color_group.addButton(btn, i)
+            color_row.addWidget(btn)
+        color_row.addStretch()
+        ctrl_layout.addRow("Markup Color:", color_row)
+        self.selected_markup_color = MARKUP_COLORS[0][1]
+        self._color_group.buttonClicked[int].connect(self._on_markup_color)
+
+        self._markup_hex = MARKUP_COLORS[0][2]
 
         layout.addWidget(ctrl_group)
 
@@ -707,6 +799,15 @@ class RequirementsPanel(QWidget):
             item.setSizeHint(item_widget.sizeHint())
             self.list_widget.addItem(item)
             self.list_widget.setItemWidget(item, item_widget)
+
+    def _on_markup_color(self, btn_id):
+        _name, rgb, hexc = self._markup_colors[btn_id]
+        self.selected_markup_color = rgb
+        self._markup_hex = hexc
+        self.next_num_edit.setStyleSheet(
+            f"background: #fff; color: {hexc}; border: 2px solid {hexc}; "
+            "border-radius: 4px; padding: 4px;"
+        )
 
     def _on_delete(self):
         row = self.list_widget.currentRow()
@@ -829,6 +930,9 @@ class MainWindow(QMainWindow):
         self._panel.sub_check.stateChanged.connect(
             lambda _: self._update_number_display()
         )
+        self._panel.next_num_edit.editingFinished.connect(
+            self._on_next_number_edited
+        )
         self._panel.edit_requested.connect(self._edit_screenshot)
         self._panel.list_widget.currentRowChanged.connect(
             self._on_list_selection_changed
@@ -847,7 +951,7 @@ class MainWindow(QMainWindow):
         try:
             with open(path, "rb") as f:
                 self._original_bytes = f.read()
-            doc = fitz.open(stream=self._original_bytes, filetype="pdf")
+            doc = self._open_clean_doc(self._original_bytes)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open PDF:\n{e}")
             return
@@ -905,6 +1009,7 @@ class MainWindow(QMainWindow):
             page=page_num,
             pdf_rect=pdf_rect,
             text=extracted,
+            markup_color=self._panel.selected_markup_color,
         )
         self._requirements.append(req)
 
@@ -920,7 +1025,7 @@ class MainWindow(QMainWindow):
     def _capture_clean(self, page_num: int, pdf_rect: tuple) -> Optional[QPixmap]:
         """Render the given rectangle from the *original* PDF at high res."""
         try:
-            doc = fitz.open(stream=self._original_bytes, filetype="pdf")
+            doc = self._open_clean_doc(self._original_bytes)
             page = doc[page_num]
             clip = fitz.Rect(pdf_rect)
             mat = fitz.Matrix(self.SCREENSHOT_ZOOM, self.SCREENSHOT_ZOOM)
@@ -945,7 +1050,7 @@ class MainWindow(QMainWindow):
         text = ""
         # 1) Native PDF text extraction
         try:
-            doc = fitz.open(stream=self._original_bytes, filetype="pdf")
+            doc = self._open_clean_doc(self._original_bytes)
             page = doc[page_num]
             text = page.get_text("text", clip=fitz.Rect(pdf_rect))
             doc.close()
@@ -989,6 +1094,35 @@ class MainWindow(QMainWindow):
             nxt = str(self._next_main)
             self._panel.sub_parent_label.setText("")
         self._panel.next_num_edit.setText(nxt)
+
+    def _on_next_number_edited(self):
+        """Handle user manually changing the next requirement number."""
+        text = self._panel.next_num_edit.text().strip()
+        if not text:
+            self._update_number_display()
+            return
+
+        if "." in text:
+            # sub-requirement format e.g. "3.2"
+            parts = text.split(".", 1)
+            try:
+                main = int(parts[0])
+                sub = int(parts[1])
+            except ValueError:
+                self._update_number_display()
+                return
+            self._last_main = main
+            self._next_sub = sub
+            if not self._panel.sub_check.isChecked():
+                self._panel.sub_check.setChecked(True)
+        else:
+            try:
+                num = int(text)
+            except ValueError:
+                self._update_number_display()
+                return
+            self._next_main = num
+            self._next_sub = 1
 
     # ===================== PDF stamping / rebuild ==========================
 
@@ -1035,9 +1169,9 @@ class MainWindow(QMainWindow):
             for req in self._requirements:
                 page = doc[req.page]
                 r = fitz.Rect(req.pdf_rect)
-                if req.edited:
-                    self._overlay_screenshot(page, r, req.screenshot)
-                self._stamp_page(page, r, req.number)
+                if req.edited and req.highlight_pixmap is not None:
+                    self._overlay_screenshot(page, r, req.highlight_pixmap)
+                self._stamp_page(page, r, req.number, req.markup_color)
 
             cur = self._viewer.current_page
             if self._doc:
@@ -1075,9 +1209,9 @@ class MainWindow(QMainWindow):
             for req in self._requirements:
                 page = doc[req.page]
                 r = fitz.Rect(req.pdf_rect)
-                if req.edited:
-                    self._overlay_screenshot(page, r, req.screenshot)
-                self._stamp_page(page, r, req.number)
+                if req.edited and req.highlight_pixmap is not None:
+                    self._overlay_screenshot(page, r, req.highlight_pixmap)
+                self._stamp_page(page, r, req.number, req.markup_color)
             doc.save(self._markup_path)
             doc.close()
             self._unsaved_changes = False
@@ -1098,13 +1232,13 @@ class MainWindow(QMainWindow):
         page.insert_image(sel_rect, stream=img_bytes.read())
 
     @staticmethod
-    def _stamp_page(page, sel_rect: fitz.Rect, number: str):
+    def _stamp_page(page, sel_rect: fitz.Rect, number: str,
+                    color: tuple = (0.85, 0.15, 0.15)):
         """Draw a dashed outline and a numbered stamp on a PDF page."""
-        red = (0.85, 0.15, 0.15)
         white = (1, 1, 1)
 
         # dashed outline around captured area
-        page.draw_rect(sel_rect, color=red, width=0.75, dashes="[3 3]")
+        page.draw_rect(sel_rect, color=color, width=0.75, dashes="[3 3]")
 
         # stamp label
         fontsize = 10
@@ -1128,14 +1262,14 @@ class MainWindow(QMainWindow):
             stamp.y0 += shift
             stamp.y1 += shift
 
-        page.draw_rect(stamp, color=red, fill=white, width=1.5)
+        page.draw_rect(stamp, color=color, fill=white, width=1.5)
         # text baseline sits near the bottom of the stamp box
         page.insert_text(
             fitz.Point(stamp.x0 + pad, stamp.y1 - pad),
             number,
             fontsize=fontsize,
             fontname=fontname,
-            color=red,
+            color=color,
         )
 
     # ===================== Requirements document export ====================
@@ -1344,6 +1478,7 @@ class MainWindow(QMainWindow):
         dlg = ScreenshotEditorDialog(req.screenshot, self)
         if dlg.exec_() == QDialog.Accepted:
             req.screenshot = dlg.get_pixmap()
+            req.highlight_pixmap = dlg.get_highlight_pixmap()
             req.edited = True
             self._rebuild_view()
             self._panel.refresh(self._requirements)
