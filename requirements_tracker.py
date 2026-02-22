@@ -993,24 +993,45 @@ class MainWindow(QMainWindow):
     # ===================== PDF stamping / rebuild ==========================
 
     @staticmethod
-    def _strip_structure_tree(doc):
-        """Remove the PDF structure tree to prevent MuPDF errors on tagged PDFs."""
+    def _open_clean_doc(pdf_bytes: bytes):
+        """Open a PDF from bytes with structure tree fully stripped.
+
+        Removes StructTreeRoot, MarkInfo from the catalog and StructParents
+        from every page, then round-trips through tobytes() so MuPDF never
+        sees leftover structure tree references.
+        """
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         try:
+            needs_clean = False
             cat = doc.pdf_catalog()
             xref = doc.xref_get_key(cat, "StructTreeRoot")
             if xref[0] != "null":
                 doc.xref_set_key(cat, "StructTreeRoot", "null")
-                xref_mark = doc.xref_get_key(cat, "MarkInfo")
-                if xref_mark[0] != "null":
-                    doc.xref_set_key(cat, "MarkInfo", "null")
+                needs_clean = True
+            xref_mark = doc.xref_get_key(cat, "MarkInfo")
+            if xref_mark[0] != "null":
+                doc.xref_set_key(cat, "MarkInfo", "null")
+                needs_clean = True
+            # remove per-page StructParents references
+            for i in range(len(doc)):
+                pxref = doc[i].xref
+                sp = doc.xref_get_key(pxref, "StructParents")
+                if sp[0] != "null":
+                    doc.xref_set_key(pxref, "StructParents", "null")
+                    needs_clean = True
+            if needs_clean:
+                # round-trip so MuPDF reparses a clean document
+                clean_bytes = doc.tobytes(garbage=4, deflate=True, clean=True)
+                doc.close()
+                doc = fitz.open(stream=clean_bytes, filetype="pdf")
         except Exception:
-            pass
+            pass  # not a valid PDF catalog — proceed as-is
+        return doc
 
     def _rebuild_view(self):
         """Recreate all stamps on a fresh copy and display (no disk save)."""
         try:
-            doc = fitz.open(stream=self._original_bytes, filetype="pdf")
-            self._strip_structure_tree(doc)
+            doc = self._open_clean_doc(self._original_bytes)
             for req in self._requirements:
                 page = doc[req.page]
                 r = fitz.Rect(req.pdf_rect)
@@ -1049,8 +1070,7 @@ class MainWindow(QMainWindow):
             self._markup_path = path
 
         try:
-            doc = fitz.open(stream=self._original_bytes, filetype="pdf")
-            self._strip_structure_tree(doc)
+            doc = self._open_clean_doc(self._original_bytes)
             for req in self._requirements:
                 page = doc[req.page]
                 r = fitz.Rect(req.pdf_rect)
