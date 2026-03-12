@@ -2018,7 +2018,7 @@ class MainWindow(QMainWindow):
                 "next_main": self._next_main,
                 "next_sub": self._next_sub,
                 "last_main": self._last_main,
-                "selected_color": self._panel.color_group.checkedId(),
+                "selected_color": self._panel._color_group.checkedId(),
                 "requirements": reqs_data,
             }
 
@@ -2084,7 +2084,7 @@ class MainWindow(QMainWindow):
 
         # restore color selection
         color_id = project.get("selected_color", 0)
-        btns = self._panel.color_group.buttons()
+        btns = self._panel._color_group.buttons()
         if 0 <= color_id < len(btns):
             btns[color_id].setChecked(True)
 
