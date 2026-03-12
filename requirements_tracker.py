@@ -949,6 +949,7 @@ class MainWindow(QMainWindow):
         self._last_main = 0
         self._unsaved_changes = False
         self._deleted_stack: list = []  # undo stack for deleted requirements
+        self._rqt_path: Optional[str] = None  # path to current .rqt project file
 
         # -- widgets --
         self._build_toolbar()
@@ -972,6 +973,12 @@ class MainWindow(QMainWindow):
         # file actions
         self._act_open = tb.addAction(
             style.standardIcon(QStyle.SP_DialogOpenButton), "Open PDF"
+        )
+        self._act_open_rqt = tb.addAction(
+            style.standardIcon(QStyle.SP_DirOpenIcon), "Open Project"
+        )
+        self._act_save_rqt = tb.addAction(
+            style.standardIcon(QStyle.SP_DriveFDIcon), "Save Project"
         )
         self._act_save = tb.addAction(
             style.standardIcon(QStyle.SP_DialogSaveButton), "Save Markup"
@@ -1027,6 +1034,8 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         self._act_open.triggered.connect(self._open_pdf)
+        self._act_open_rqt.triggered.connect(self._open_rqt)
+        self._act_save_rqt.triggered.connect(self._save_rqt)
         self._act_save.triggered.connect(self._save_markup)
         self._act_export.triggered.connect(self._manual_export)
         self._act_prev.triggered.connect(self._viewer.prev_page)
@@ -1058,11 +1067,14 @@ class MainWindow(QMainWindow):
     def _open_pdf(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open PDF / Drawing / SOW", "",
-            "PDF Files (*.pdf);;All Files (*)"
+            "PDF Files (*.pdf);;Requirements Projects (*.rqt);;All Files (*)"
         )
         if not path:
             return
-        self._open_pdf_from_path(path)
+        if path.lower().endswith(".rqt"):
+            self._open_rqt_from_path(path)
+        else:
+            self._open_pdf_from_path(path)
 
     def _open_pdf_from_path(self, path: str):
         try:
@@ -1814,7 +1826,8 @@ class MainWindow(QMainWindow):
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
-                if url.toLocalFile().lower().endswith(".pdf"):
+                lp = url.toLocalFile().lower()
+                if lp.endswith(".pdf") or lp.endswith(".rqt"):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -1825,6 +1838,9 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event):
         for url in event.mimeData().urls():
             path = url.toLocalFile()
+            if path.lower().endswith(".rqt"):
+                self._open_rqt_from_path(path)
+                return
             if path.lower().endswith(".pdf"):
                 self._open_pdf_from_path(path)
                 return
@@ -1956,11 +1972,166 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
 
+    # ===================== .rqt project file save / open ====================
+
+    def _save_rqt(self):
+        """Save the current PDF + requirements state to an .rqt project file."""
+        if not self._pdf_path or not self._original_bytes:
+            QMessageBox.information(
+                self, "No PDF",
+                "Open a PDF and capture requirements before saving."
+            )
+            return
+
+        default_name = os.path.splitext(self._pdf_path)[0] + ".rqt"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Requirements Project", default_name,
+            "Requirements Tracker Project (*.rqt);;All Files (*)"
+        )
+        if not path:
+            return
+
+        try:
+            reqs_data = []
+            for req in self._requirements:
+                entry = {
+                    "number": req.number,
+                    "page": req.page,
+                    "pdf_rect": list(req.pdf_rect),
+                    "text": req.text,
+                    "edited": req.edited,
+                    "markup_color": list(req.markup_color),
+                    "notes": req.notes,
+                    "screenshot": self._pixmap_to_b64(req.screenshot),
+                }
+                if req.highlight_pixmap is not None:
+                    entry["highlight_pixmap"] = self._pixmap_to_b64(
+                        req.highlight_pixmap
+                    )
+                reqs_data.append(entry)
+
+            project = {
+                "version": 1,
+                "pdf_filename": os.path.basename(self._pdf_path),
+                "pdf_data": base64.b64encode(self._original_bytes).decode("ascii"),
+                "sub_mode": self._panel.sub_check.isChecked(),
+                "next_main": self._next_main,
+                "next_sub": self._next_sub,
+                "last_main": self._last_main,
+                "selected_color": self._panel.color_group.checkedId(),
+                "requirements": reqs_data,
+            }
+
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(project, f)
+
+            self._rqt_path = path
+            self._status.showMessage(f"Project saved: {os.path.basename(path)}")
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Save Error", f"Failed to save project:\n{e}"
+            )
+
+    def _open_rqt(self):
+        """Open an .rqt project file and restore PDF + requirements state."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open Requirements Project", "",
+            "Requirements Tracker Project (*.rqt);;All Files (*)"
+        )
+        if not path:
+            return
+        self._open_rqt_from_path(path)
+
+    def _open_rqt_from_path(self, path: str):
+        """Load an .rqt project file from a given path."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                project = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Open Error", f"Failed to read project file:\n{e}"
+            )
+            return
+
+        # extract embedded PDF
+        try:
+            pdf_bytes = base64.b64decode(project["pdf_data"])
+            doc = self._open_clean_doc(pdf_bytes)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Open Error", f"Failed to load PDF from project:\n{e}"
+            )
+            return
+
+        # reset state
+        self._original_bytes = pdf_bytes
+        self._pdf_path = os.path.join(
+            os.path.dirname(path), project.get("pdf_filename", "document.pdf")
+        )
+        self._rqt_path = path
+        self._markup_path = None
+        self._doc = doc
+        self._requirements.clear()
+        self._deleted_stack.clear()
+
+        # restore numbering state
+        self._next_main = project.get("next_main", 1)
+        self._next_sub = project.get("next_sub", 1)
+        self._last_main = project.get("last_main", 0)
+
+        # restore sub-mode checkbox
+        self._panel.sub_check.setChecked(project.get("sub_mode", False))
+
+        # restore color selection
+        color_id = project.get("selected_color", 0)
+        btns = self._panel.color_group.buttons()
+        if 0 <= color_id < len(btns):
+            btns[color_id].setChecked(True)
+
+        # restore requirements
+        for entry in project.get("requirements", []):
+            screenshot = self._b64_to_pixmap(entry["screenshot"])
+            highlight = None
+            if "highlight_pixmap" in entry:
+                highlight = self._b64_to_pixmap(entry["highlight_pixmap"])
+            self._requirements.append(Requirement(
+                number=entry["number"],
+                screenshot=screenshot,
+                page=entry["page"],
+                pdf_rect=tuple(entry["pdf_rect"]),
+                text=entry.get("text", ""),
+                edited=entry.get("edited", False),
+                highlight_pixmap=highlight,
+                markup_color=tuple(entry.get("markup_color",
+                                             (0.85, 0.15, 0.15))),
+                notes=entry.get("notes", ""),
+            ))
+
+        self._sort_requirements()
+        self._viewer.set_document(self._doc, page=0)
+        self._viewer.fit_width()
+        self._rebuild_view()
+        self._panel.refresh(self._requirements)
+        self._update_number_display()
+        self._set_unsaved(False)
+        self._status.showMessage(
+            f"Project opened: {os.path.basename(path)} "
+            f"({len(self._requirements)} requirement(s))"
+        )
+
     # ===================== Keyboard shortcuts ==============================
 
     def keyPressEvent(self, event):
         key = event.key()
         mod = event.modifiers()
+
+        if mod == (Qt.ControlModifier | Qt.ShiftModifier):
+            if key == Qt.Key_S:
+                self._save_rqt()
+                return
+            if key == Qt.Key_O:
+                self._open_rqt()
+                return
 
         if mod == Qt.ControlModifier:
             if key == Qt.Key_O:
@@ -2294,6 +2465,16 @@ def main():
 
     window = MainWindow()
     window.show()
+
+    # open file passed as command-line argument
+    if len(sys.argv) > 1:
+        file_arg = sys.argv[1]
+        if os.path.isfile(file_arg):
+            if file_arg.lower().endswith(".rqt"):
+                window._open_rqt_from_path(file_arg)
+            elif file_arg.lower().endswith(".pdf"):
+                window._open_pdf_from_path(file_arg)
+
     sys.exit(app.exec_())
 
 
